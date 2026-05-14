@@ -1,22 +1,19 @@
 version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────
-#  MSA 전체 통합 docker-compose  (linux/amd64 빌드)
+#  MSA 전체 통합 docker-compose  (GHCR 이미지 기반, linux/amd64)
 #
 #  사용법:
-#    docker compose -f docker-compose.msa.yml up --build
-#    docker compose -f docker-compose.msa.yml down -v   (볼륨 포함 삭제)
+#    docker compose -f docker-compose.msa.yml up        # 이미지 pull 후 실행
+#    docker compose -f docker-compose.msa.yml pull       # 최신 이미지 갱신
+#    docker compose -f docker-compose.msa.yml down -v    # 볼륨 포함 삭제
 #
-#  amd64 강제 지정 이유:
-#    Apple Silicon(M1/M2/M3) Mac에서 빌드해도
-#    온프레미스 kubeadm VM(x86_64)·AWS EKS(x86_64)에서 동작하도록 고정
+#  이미지 레지스트리: ghcr.io/gummy-jelly/stays/{service}:latest
 # ─────────────────────────────────────────────────────────────────
 
-# ── 공통 환경변수 ─────────────────────────────────────────────────
 x-db-env: &db-env
   DATABASE_URL: postgresql://postgres:stays_password@db:5432/stays_db
 
-# auth-service 전용 (JWT_SECRET — 30분 만료, Redis refresh token)
 x-auth-env: &auth-env
   DATABASE_URL: postgresql://postgres:stays_password@db:5432/stays_db
   JWT_SECRET: local-dev-secret-minimum-32-characters!!
@@ -24,13 +21,11 @@ x-auth-env: &auth-env
   REFRESH_EXPIRE: 7
   REDIS_URL: redis://redis:6379/0
 
-# 나머지 서비스 공통 (JWT_SECRET_KEY — 토큰 검증 전용)
 x-svc-env: &svc-env
   DATABASE_URL: postgresql://postgres:stays_password@db:5432/stays_db
   JWT_SECRET_KEY: local-dev-secret-minimum-32-characters!!
   REDIS_URL: redis://redis:6379
 
-# ── 서비스 기본값 ─────────────────────────────────────────────────
 x-defaults: &defaults
   platform: linux/amd64
   restart: unless-stopped
@@ -80,14 +75,10 @@ services:
 
   auth-service:
     <<: *defaults
-    build:
-      context: ./services/auth-service
-      dockerfile: Dockerfile
-      args:
-        BUILDPLATFORM: linux/amd64
+    image: ghcr.io/gummy-jelly/stays/auth-service:latest
     container_name: auth-service
     ports:
-      - "8001:8000"          # 내부 포트 8000 (새 Dockerfile 기준)
+      - "8001:8000"
     environment:
       <<: *auth-env
     depends_on:
@@ -104,9 +95,7 @@ services:
 
   stays-service:
     <<: *defaults
-    build:
-      context: ./services/stays-service
-      dockerfile: Dockerfile
+    image: ghcr.io/gummy-jelly/stays/stays-service:latest
     container_name: stays-service
     ports:
       - "8002:8002"
@@ -124,9 +113,7 @@ services:
 
   event-service:
     <<: *defaults
-    build:
-      context: ./services/event-service
-      dockerfile: Dockerfile
+    image: ghcr.io/gummy-jelly/stays/event-service:latest
     container_name: event-service
     ports:
       - "8003:8003"
@@ -144,9 +131,7 @@ services:
 
   coupon-service:
     <<: *defaults
-    build:
-      context: ./services/coupon-service
-      dockerfile: Dockerfile
+    image: ghcr.io/gummy-jelly/stays/coupon-service:latest
     container_name: coupon-service
     ports:
       - "8004:8004"
@@ -164,9 +149,7 @@ services:
 
   booking-service:
     <<: *defaults
-    build:
-      context: ./services/booking-service
-      dockerfile: Dockerfile
+    image: ghcr.io/gummy-jelly/stays/booking-service:latest
     container_name: booking-service
     ports:
       - "8005:8005"
@@ -186,9 +169,7 @@ services:
 
   notification-service:
     <<: *defaults
-    build:
-      context: ./services/notification-service
-      dockerfile: Dockerfile
+    image: ghcr.io/gummy-jelly/stays/notification-service:latest
     container_name: notification-service
     ports:
       - "8006:8006"
@@ -206,28 +187,11 @@ services:
       retries: 3
       start_period: 15s
 
-  # ── 프론트엔드 ──────────────────────────────────────────────────
-
-  frontend:
-    <<: *defaults
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-      args:
-        VITE_API_URL: ""
-        VITE_KAKAO_MAP_KEY: 7f8b9c6ef339ead8af4c274471dd0382
-    container_name: msa-frontend
-    depends_on:
-      auth-service:
-        condition: service_healthy
-
-  # ── API Gateway (Nginx) ──────────────────────────────────────────
+  # ── API Gateway ──────────────────────────────────────────────────
 
   api-gateway:
     <<: *defaults
-    build:
-      context: ./services/api-gateway
-      dockerfile: Dockerfile
+    image: ghcr.io/gummy-jelly/stays/api-gateway:latest
     container_name: api-gateway
     ports:
       - "80:80"
@@ -238,7 +202,6 @@ services:
       - coupon-service
       - booking-service
       - notification-service
-      - frontend
 
 # ─────────────────────────────────────────────────────────────────
 volumes:
