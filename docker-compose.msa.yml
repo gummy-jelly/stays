@@ -1,0 +1,250 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────
+#  MSA 전체 통합 docker-compose  (linux/amd64 빌드)
+#
+#  사용법:
+#    docker compose -f docker-compose.msa.yml up --build
+#    docker compose -f docker-compose.msa.yml down -v   (볼륨 포함 삭제)
+#
+#  amd64 강제 지정 이유:
+#    Apple Silicon(M1/M2/M3) Mac에서 빌드해도
+#    온프레미스 kubeadm VM(x86_64)·AWS EKS(x86_64)에서 동작하도록 고정
+# ─────────────────────────────────────────────────────────────────
+
+# ── 공통 환경변수 ─────────────────────────────────────────────────
+x-db-env: &db-env
+  DATABASE_URL: postgresql://postgres:stays_password@db:5432/stays_db
+
+# auth-service 전용 (JWT_SECRET — 30분 만료, Redis refresh token)
+x-auth-env: &auth-env
+  DATABASE_URL: postgresql://postgres:stays_password@db:5432/stays_db
+  JWT_SECRET: local-dev-secret-minimum-32-characters!!
+  JWT_EXPIRE: 30
+  REFRESH_EXPIRE: 7
+  REDIS_URL: redis://redis:6379/0
+
+# 나머지 서비스 공통 (JWT_SECRET_KEY — 토큰 검증 전용)
+x-svc-env: &svc-env
+  DATABASE_URL: postgresql://postgres:stays_password@db:5432/stays_db
+  JWT_SECRET_KEY: local-dev-secret-minimum-32-characters!!
+  REDIS_URL: redis://redis:6379
+
+# ── 서비스 기본값 ─────────────────────────────────────────────────
+x-defaults: &defaults
+  platform: linux/amd64
+  restart: unless-stopped
+  networks:
+    - msa-net
+
+# ─────────────────────────────────────────────────────────────────
+services:
+
+  # ── 인프라 ──────────────────────────────────────────────────────
+
+  db:
+    <<: *defaults
+    image: postgres:16
+    container_name: msa-db
+    environment:
+      POSTGRES_DB: stays_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: stays_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./services/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stays_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    <<: *defaults
+    image: redis:7-alpine
+    container_name: msa-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── 백엔드 서비스 ────────────────────────────────────────────────
+
+  auth-service:
+    <<: *defaults
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+      args:
+        BUILDPLATFORM: linux/amd64
+    container_name: auth-service
+    ports:
+      - "8001:8000"          # 내부 포트 8000 (새 Dockerfile 기준)
+    environment:
+      <<: *auth-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  stays-service:
+    <<: *defaults
+    build:
+      context: ./services/stays-service
+      dockerfile: Dockerfile
+    container_name: stays-service
+    ports:
+      - "8002:8002"
+    environment:
+      <<: *db-env
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  event-service:
+    <<: *defaults
+    build:
+      context: ./services/event-service
+      dockerfile: Dockerfile
+    container_name: event-service
+    ports:
+      - "8003:8003"
+    environment:
+      <<: *db-env
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  coupon-service:
+    <<: *defaults
+    build:
+      context: ./services/coupon-service
+      dockerfile: Dockerfile
+    container_name: coupon-service
+    ports:
+      - "8004:8004"
+    environment:
+      <<: *svc-env
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8004/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  booking-service:
+    <<: *defaults
+    build:
+      context: ./services/booking-service
+      dockerfile: Dockerfile
+    container_name: booking-service
+    ports:
+      - "8005:8005"
+    environment:
+      <<: *svc-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8005/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  notification-service:
+    <<: *defaults
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: notification-service
+    ports:
+      - "8006:8006"
+    environment:
+      <<: *svc-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8006/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── 프론트엔드 ──────────────────────────────────────────────────
+
+  frontend:
+    <<: *defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_URL: ""
+        VITE_KAKAO_MAP_KEY: 7f8b9c6ef339ead8af4c274471dd0382
+    container_name: msa-frontend
+    depends_on:
+      auth-service:
+        condition: service_healthy
+
+  # ── API Gateway (Nginx) ──────────────────────────────────────────
+
+  api-gateway:
+    <<: *defaults
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    ports:
+      - "80:80"
+    depends_on:
+      - auth-service
+      - stays-service
+      - event-service
+      - coupon-service
+      - booking-service
+      - notification-service
+      - frontend
+
+# ─────────────────────────────────────────────────────────────────
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  msa-net:
+    driver: bridge

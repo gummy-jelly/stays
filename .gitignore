@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# 환경변수 (절대 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+.parcel-cache/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Docker
+*.log
+
+# 테스트 결과
+loadtest/results/*
+!loadtest/results/.gitkeep

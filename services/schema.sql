@@ -1,0 +1,1739 @@
+-- MSA 공유 DB 스키마 (실 데이터 기반)
+-- PostgreSQL 16
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+
+-- ── users ──
+CREATE TABLE IF NOT EXISTS users (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name       VARCHAR(100) NOT NULL,
+    email      VARCHAR(255) NOT NULL UNIQUE,
+    password   VARCHAR(255) NOT NULL,
+    phone      VARCHAR(20),
+    is_active  BOOLEAN     NOT NULL DEFAULT TRUE,
+    is_admin   BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── amenities ──
+CREATE TABLE IF NOT EXISTS amenities (
+    id   UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL UNIQUE
+);
+
+-- ── stays ──
+-- 원본 컬럼명 유지 (region/lat/lng/price_per_night/review_count)
+-- 서비스 코드에서 SQL AS로 프론트엔드 호환 필드명 제공
+CREATE TABLE IF NOT EXISTS stays (
+    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    name           VARCHAR(255)  NOT NULL,
+    description    TEXT,
+    region         VARCHAR(100)  NOT NULL,
+    address        VARCHAR(255),
+    lat            DOUBLE PRECISION,
+    lng            DOUBLE PRECISION,
+    price_per_night INTEGER      NOT NULL,
+    max_guests     INTEGER       NOT NULL,
+    rating         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    review_count   INTEGER       NOT NULL DEFAULT 0,
+    host_id        UUID,
+    created_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    -- 서비스/프론트 추가 컬럼 (NULL 허용)
+    category       VARCHAR(100),
+    tags           TEXT[]        NOT NULL DEFAULT '{}',
+    image_url      TEXT,
+    badge          VARCHAR(100),
+    bedrooms       INTEGER       DEFAULT 1,
+    bathrooms      INTEGER       DEFAULT 1,
+    host_name      VARCHAR(100)
+);
+
+-- ── stay_images ──
+CREATE TABLE IF NOT EXISTS stay_images (
+    id       UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
+    stay_id  UUID    NOT NULL REFERENCES stays(id) ON DELETE CASCADE,
+    url      VARCHAR(500) NOT NULL,
+    is_main  BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- ── stay_amenities ──
+CREATE TABLE IF NOT EXISTS stay_amenities (
+    stay_id    UUID NOT NULL REFERENCES stays(id) ON DELETE CASCADE,
+    amenity_id UUID NOT NULL REFERENCES amenities(id) ON DELETE CASCADE,
+    PRIMARY KEY (stay_id, amenity_id)
+);
+
+-- ── rooms ──
+CREATE TABLE IF NOT EXISTS rooms (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    stay_id         UUID        NOT NULL REFERENCES stays(id) ON DELETE CASCADE,
+    name            VARCHAR(100) NOT NULL,
+    max_guests      INTEGER     NOT NULL,
+    price_per_night INTEGER     NOT NULL,
+    room_count      INTEGER     NOT NULL DEFAULT 1,
+    remaining_count INTEGER     NOT NULL DEFAULT 1,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── reviews ──
+CREATE TABLE IF NOT EXISTS reviews (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID        REFERENCES users(id),
+    stay_id    UUID        REFERENCES stays(id) ON DELETE CASCADE,
+    booking_id UUID,
+    rating     INTEGER     NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    content    TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── events ──
+CREATE TABLE IF NOT EXISTS events (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    title           VARCHAR(255) NOT NULL,
+    description     TEXT,
+    discount_rate   INTEGER,
+    start_date      DATE,
+    end_date        DATE,
+    status          VARCHAR(20)  NOT NULL DEFAULT 'upcoming',
+    type            VARCHAR(50),
+    region          VARCHAR(100),
+    total_rooms     INTEGER     NOT NULL DEFAULT 500,
+    remaining_rooms INTEGER     NOT NULL DEFAULT 500,
+    banner_color    VARCHAR(20)  DEFAULT '#111111'
+);
+
+-- ── event_stays ──
+CREATE TABLE IF NOT EXISTS event_stays (
+    event_id        UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    stay_id         UUID NOT NULL REFERENCES stays(id) ON DELETE CASCADE,
+    discount_rate   INTEGER NOT NULL DEFAULT 0,
+    remaining_rooms INTEGER NOT NULL DEFAULT 10,
+    PRIMARY KEY (event_id, stay_id)
+);
+
+-- ── coupons ──
+-- used_by IS NULL  : 마스터 쿠폰 (재고 풀)
+-- used_by IS NOT NULL : 사용자가 발급받은 쿠폰
+CREATE TABLE IF NOT EXISTS coupons (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    code            VARCHAR(20) NOT NULL,
+    event_id        UUID        REFERENCES events(id),
+    stay_id         UUID        REFERENCES stays(id),
+    discount_rate   INTEGER,
+    total_count     INTEGER,
+    remaining_count INTEGER,
+    used_by         UUID        REFERENCES users(id),
+    is_used         BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_master_unique
+    ON coupons(code) WHERE used_by IS NULL;
+CREATE INDEX IF NOT EXISTS idx_coupons_used_by ON coupons(used_by);
+
+-- ── bookings ──
+CREATE TABLE IF NOT EXISTS bookings (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID        REFERENCES users(id),
+    stay_id         UUID        REFERENCES stays(id),
+    stay_name       VARCHAR(255),
+    room_id         UUID        REFERENCES rooms(id),
+    room_name       VARCHAR(255),
+    check_in        DATE        NOT NULL,
+    check_out       DATE        NOT NULL,
+    guests          INTEGER     NOT NULL,
+    total_price     INTEGER     NOT NULL,
+    original_price  INTEGER,
+    cleaning_fee    INTEGER     DEFAULT 30000,
+    service_fee     INTEGER     DEFAULT 0,
+    discount_amount INTEGER     DEFAULT 0,
+    payment_method  VARCHAR(50),
+    special_request TEXT,
+    status          VARCHAR(20)  NOT NULL DEFAULT 'confirmed',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_id        UUID        REFERENCES events(id),
+    coupon_id       UUID        REFERENCES coupons(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bookings_user_id ON bookings(user_id);
+
+-- ── notifications ──
+CREATE TABLE IF NOT EXISTS notifications (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID        NOT NULL REFERENCES users(id),
+    booking_id UUID        REFERENCES bookings(id),
+    message    TEXT        NOT NULL,
+    is_read    BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+
+-- ─────────────────────────────────────────────
+-- 시드 데이터 (실제 데이터)
+-- ─────────────────────────────────────────────
+
+-- ── amenities ──
+COPY amenities (id, name) FROM stdin;
+d7a09596-9c5d-4859-8b15-5e7048a0c667	와이파이
+5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52	주차
+7e78a3cf-5068-4adb-a42d-354cf0fcd008	수영장
+c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2	조식포함
+5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d	에어컨
+4dc09467-55e4-487b-a201-790e1a513f94	바베큐
+23e8fa46-e737-4491-bd49-4cbc206b99d9	온천
+fe441253-191f-4db6-b891-f718b34d2eef	반려동물
+4efb90d1-e520-41da-90b1-89eb9cd7f890	세탁기
+a83de682-d8cf-4f00-97c1-6399650c9717	주방
+\.
+
+-- ── stay_amenities ──
+COPY stay_amenities (stay_id, amenity_id) FROM stdin;
+9cb96a8c-68f4-4f87-ba50-34b23e1249aa	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+9cb96a8c-68f4-4f87-ba50-34b23e1249aa	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+9cb96a8c-68f4-4f87-ba50-34b23e1249aa	4efb90d1-e520-41da-90b1-89eb9cd7f890
+9cb96a8c-68f4-4f87-ba50-34b23e1249aa	4dc09467-55e4-487b-a201-790e1a513f94
+9cb96a8c-68f4-4f87-ba50-34b23e1249aa	23e8fa46-e737-4491-bd49-4cbc206b99d9
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	4dc09467-55e4-487b-a201-790e1a513f94
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	d7a09596-9c5d-4859-8b15-5e7048a0c667
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	a83de682-d8cf-4f00-97c1-6399650c9717
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	23e8fa46-e737-4491-bd49-4cbc206b99d9
+1a568fb4-84d5-4b61-a5c7-144321eda70b	a83de682-d8cf-4f00-97c1-6399650c9717
+1a568fb4-84d5-4b61-a5c7-144321eda70b	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+1a568fb4-84d5-4b61-a5c7-144321eda70b	23e8fa46-e737-4491-bd49-4cbc206b99d9
+1a568fb4-84d5-4b61-a5c7-144321eda70b	4efb90d1-e520-41da-90b1-89eb9cd7f890
+1a568fb4-84d5-4b61-a5c7-144321eda70b	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+1a568fb4-84d5-4b61-a5c7-144321eda70b	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+b7160a1a-901d-4569-a8f2-f5a9a7ab623e	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+b7160a1a-901d-4569-a8f2-f5a9a7ab623e	23e8fa46-e737-4491-bd49-4cbc206b99d9
+b7160a1a-901d-4569-a8f2-f5a9a7ab623e	fe441253-191f-4db6-b891-f718b34d2eef
+1ac108fc-359e-4045-aa3e-94066fd9d2d9	a83de682-d8cf-4f00-97c1-6399650c9717
+1ac108fc-359e-4045-aa3e-94066fd9d2d9	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+1ac108fc-359e-4045-aa3e-94066fd9d2d9	d7a09596-9c5d-4859-8b15-5e7048a0c667
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	fe441253-191f-4db6-b891-f718b34d2eef
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	a83de682-d8cf-4f00-97c1-6399650c9717
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	4dc09467-55e4-487b-a201-790e1a513f94
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	23e8fa46-e737-4491-bd49-4cbc206b99d9
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+9f1b56e8-fff8-42d5-b421-1b3045236300	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+9f1b56e8-fff8-42d5-b421-1b3045236300	23e8fa46-e737-4491-bd49-4cbc206b99d9
+9f1b56e8-fff8-42d5-b421-1b3045236300	a83de682-d8cf-4f00-97c1-6399650c9717
+a7fbefbc-c1d1-41a1-ada7-acec62048f2f	d7a09596-9c5d-4859-8b15-5e7048a0c667
+a7fbefbc-c1d1-41a1-ada7-acec62048f2f	4dc09467-55e4-487b-a201-790e1a513f94
+a7fbefbc-c1d1-41a1-ada7-acec62048f2f	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+e497fb6f-c7bb-4e34-b943-421b29ecc4f9	4dc09467-55e4-487b-a201-790e1a513f94
+e497fb6f-c7bb-4e34-b943-421b29ecc4f9	a83de682-d8cf-4f00-97c1-6399650c9717
+e497fb6f-c7bb-4e34-b943-421b29ecc4f9	fe441253-191f-4db6-b891-f718b34d2eef
+e497fb6f-c7bb-4e34-b943-421b29ecc4f9	d7a09596-9c5d-4859-8b15-5e7048a0c667
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	a83de682-d8cf-4f00-97c1-6399650c9717
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	23e8fa46-e737-4491-bd49-4cbc206b99d9
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	4dc09467-55e4-487b-a201-790e1a513f94
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	fe441253-191f-4db6-b891-f718b34d2eef
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	d7a09596-9c5d-4859-8b15-5e7048a0c667
+f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	d7a09596-9c5d-4859-8b15-5e7048a0c667
+f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	23e8fa46-e737-4491-bd49-4cbc206b99d9
+f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	4efb90d1-e520-41da-90b1-89eb9cd7f890
+8d6d5122-6bcb-40d4-8a58-b43cdb967885	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+8d6d5122-6bcb-40d4-8a58-b43cdb967885	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+8d6d5122-6bcb-40d4-8a58-b43cdb967885	4dc09467-55e4-487b-a201-790e1a513f94
+8d6d5122-6bcb-40d4-8a58-b43cdb967885	fe441253-191f-4db6-b891-f718b34d2eef
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	4dc09467-55e4-487b-a201-790e1a513f94
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	23e8fa46-e737-4491-bd49-4cbc206b99d9
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	fe441253-191f-4db6-b891-f718b34d2eef
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	a83de682-d8cf-4f00-97c1-6399650c9717
+0d16c734-b953-4830-9fbb-0f2ba421f6b8	4efb90d1-e520-41da-90b1-89eb9cd7f890
+0d16c734-b953-4830-9fbb-0f2ba421f6b8	fe441253-191f-4db6-b891-f718b34d2eef
+0d16c734-b953-4830-9fbb-0f2ba421f6b8	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+0d16c734-b953-4830-9fbb-0f2ba421f6b8	23e8fa46-e737-4491-bd49-4cbc206b99d9
+0d16c734-b953-4830-9fbb-0f2ba421f6b8	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+fafc92a2-31f7-472a-8eb5-5a16012d9005	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+fafc92a2-31f7-472a-8eb5-5a16012d9005	4efb90d1-e520-41da-90b1-89eb9cd7f890
+fafc92a2-31f7-472a-8eb5-5a16012d9005	a83de682-d8cf-4f00-97c1-6399650c9717
+fafc92a2-31f7-472a-8eb5-5a16012d9005	fe441253-191f-4db6-b891-f718b34d2eef
+fafc92a2-31f7-472a-8eb5-5a16012d9005	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+fafc92a2-31f7-472a-8eb5-5a16012d9005	d7a09596-9c5d-4859-8b15-5e7048a0c667
+b383ceef-b5c7-49b3-80d9-d287ec062c0a	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+b383ceef-b5c7-49b3-80d9-d287ec062c0a	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+b383ceef-b5c7-49b3-80d9-d287ec062c0a	23e8fa46-e737-4491-bd49-4cbc206b99d9
+236c38f8-a7de-428b-9b73-63bd854975ac	4efb90d1-e520-41da-90b1-89eb9cd7f890
+236c38f8-a7de-428b-9b73-63bd854975ac	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+236c38f8-a7de-428b-9b73-63bd854975ac	a83de682-d8cf-4f00-97c1-6399650c9717
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	a83de682-d8cf-4f00-97c1-6399650c9717
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	4efb90d1-e520-41da-90b1-89eb9cd7f890
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	23e8fa46-e737-4491-bd49-4cbc206b99d9
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	fe441253-191f-4db6-b891-f718b34d2eef
+beb5fb68-68d3-43f3-8aac-6d445a82e1a8	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+beb5fb68-68d3-43f3-8aac-6d445a82e1a8	4efb90d1-e520-41da-90b1-89eb9cd7f890
+beb5fb68-68d3-43f3-8aac-6d445a82e1a8	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+beb5fb68-68d3-43f3-8aac-6d445a82e1a8	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+beb5fb68-68d3-43f3-8aac-6d445a82e1a8	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+cd28e925-c07d-4115-9230-1f2e991b665e	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+cd28e925-c07d-4115-9230-1f2e991b665e	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+cd28e925-c07d-4115-9230-1f2e991b665e	a83de682-d8cf-4f00-97c1-6399650c9717
+cd28e925-c07d-4115-9230-1f2e991b665e	23e8fa46-e737-4491-bd49-4cbc206b99d9
+1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	fe441253-191f-4db6-b891-f718b34d2eef
+1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	a83de682-d8cf-4f00-97c1-6399650c9717
+1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	23e8fa46-e737-4491-bd49-4cbc206b99d9
+94f5f0a9-115e-4c78-be1a-8f92dc2640be	a83de682-d8cf-4f00-97c1-6399650c9717
+94f5f0a9-115e-4c78-be1a-8f92dc2640be	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+94f5f0a9-115e-4c78-be1a-8f92dc2640be	4efb90d1-e520-41da-90b1-89eb9cd7f890
+94f5f0a9-115e-4c78-be1a-8f92dc2640be	d7a09596-9c5d-4859-8b15-5e7048a0c667
+94f5f0a9-115e-4c78-be1a-8f92dc2640be	4dc09467-55e4-487b-a201-790e1a513f94
+2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	d7a09596-9c5d-4859-8b15-5e7048a0c667
+2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	4dc09467-55e4-487b-a201-790e1a513f94
+bf609333-bb05-450d-b9ef-29b0e6b47563	fe441253-191f-4db6-b891-f718b34d2eef
+bf609333-bb05-450d-b9ef-29b0e6b47563	a83de682-d8cf-4f00-97c1-6399650c9717
+bf609333-bb05-450d-b9ef-29b0e6b47563	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+bf609333-bb05-450d-b9ef-29b0e6b47563	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+bf609333-bb05-450d-b9ef-29b0e6b47563	4efb90d1-e520-41da-90b1-89eb9cd7f890
+bf609333-bb05-450d-b9ef-29b0e6b47563	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+6a493540-58bc-4f9e-83fd-e56254d70913	4dc09467-55e4-487b-a201-790e1a513f94
+6a493540-58bc-4f9e-83fd-e56254d70913	a83de682-d8cf-4f00-97c1-6399650c9717
+6a493540-58bc-4f9e-83fd-e56254d70913	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+6a493540-58bc-4f9e-83fd-e56254d70913	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+6a493540-58bc-4f9e-83fd-e56254d70913	23e8fa46-e737-4491-bd49-4cbc206b99d9
+dccd1b8d-a5b4-4990-b769-cf664a1e8511	4efb90d1-e520-41da-90b1-89eb9cd7f890
+dccd1b8d-a5b4-4990-b769-cf664a1e8511	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+dccd1b8d-a5b4-4990-b769-cf664a1e8511	d7a09596-9c5d-4859-8b15-5e7048a0c667
+dccd1b8d-a5b4-4990-b769-cf664a1e8511	fe441253-191f-4db6-b891-f718b34d2eef
+40d604e2-f942-4507-bcb5-1683ae90353c	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+40d604e2-f942-4507-bcb5-1683ae90353c	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+40d604e2-f942-4507-bcb5-1683ae90353c	4efb90d1-e520-41da-90b1-89eb9cd7f890
+40d604e2-f942-4507-bcb5-1683ae90353c	d7a09596-9c5d-4859-8b15-5e7048a0c667
+d638547b-4035-4287-acd0-86ca7c24a68b	23e8fa46-e737-4491-bd49-4cbc206b99d9
+d638547b-4035-4287-acd0-86ca7c24a68b	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+d638547b-4035-4287-acd0-86ca7c24a68b	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+d638547b-4035-4287-acd0-86ca7c24a68b	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+d638547b-4035-4287-acd0-86ca7c24a68b	a83de682-d8cf-4f00-97c1-6399650c9717
+d638547b-4035-4287-acd0-86ca7c24a68b	4efb90d1-e520-41da-90b1-89eb9cd7f890
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	d7a09596-9c5d-4859-8b15-5e7048a0c667
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	fe441253-191f-4db6-b891-f718b34d2eef
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	4efb90d1-e520-41da-90b1-89eb9cd7f890
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	a83de682-d8cf-4f00-97c1-6399650c9717
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	23e8fa46-e737-4491-bd49-4cbc206b99d9
+a525650c-75f9-4334-a196-cd0958a8b9d1	4efb90d1-e520-41da-90b1-89eb9cd7f890
+a525650c-75f9-4334-a196-cd0958a8b9d1	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+a525650c-75f9-4334-a196-cd0958a8b9d1	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+a525650c-75f9-4334-a196-cd0958a8b9d1	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+a525650c-75f9-4334-a196-cd0958a8b9d1	fe441253-191f-4db6-b891-f718b34d2eef
+a525650c-75f9-4334-a196-cd0958a8b9d1	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+485e38aa-abdc-45e4-9464-f7d285d4691f	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+485e38aa-abdc-45e4-9464-f7d285d4691f	a83de682-d8cf-4f00-97c1-6399650c9717
+485e38aa-abdc-45e4-9464-f7d285d4691f	fe441253-191f-4db6-b891-f718b34d2eef
+e3d4c901-3e76-443d-91ec-d773b6ec2ce0	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+e3d4c901-3e76-443d-91ec-d773b6ec2ce0	d7a09596-9c5d-4859-8b15-5e7048a0c667
+e3d4c901-3e76-443d-91ec-d773b6ec2ce0	fe441253-191f-4db6-b891-f718b34d2eef
+e3d4c901-3e76-443d-91ec-d773b6ec2ce0	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+e3d4c901-3e76-443d-91ec-d773b6ec2ce0	4efb90d1-e520-41da-90b1-89eb9cd7f890
+4b9de8d3-ffed-41c1-87a8-290aaf859845	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+4b9de8d3-ffed-41c1-87a8-290aaf859845	4efb90d1-e520-41da-90b1-89eb9cd7f890
+4b9de8d3-ffed-41c1-87a8-290aaf859845	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+4b9de8d3-ffed-41c1-87a8-290aaf859845	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+64c39003-d9dd-4d23-ba12-3ef937497e60	4dc09467-55e4-487b-a201-790e1a513f94
+64c39003-d9dd-4d23-ba12-3ef937497e60	23e8fa46-e737-4491-bd49-4cbc206b99d9
+64c39003-d9dd-4d23-ba12-3ef937497e60	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+64c39003-d9dd-4d23-ba12-3ef937497e60	fe441253-191f-4db6-b891-f718b34d2eef
+64c39003-d9dd-4d23-ba12-3ef937497e60	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+64c39003-d9dd-4d23-ba12-3ef937497e60	4efb90d1-e520-41da-90b1-89eb9cd7f890
+7a663c92-4bd6-4138-b863-90cee940de7e	a83de682-d8cf-4f00-97c1-6399650c9717
+7a663c92-4bd6-4138-b863-90cee940de7e	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+7a663c92-4bd6-4138-b863-90cee940de7e	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+7a663c92-4bd6-4138-b863-90cee940de7e	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+7a663c92-4bd6-4138-b863-90cee940de7e	4efb90d1-e520-41da-90b1-89eb9cd7f890
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	23e8fa46-e737-4491-bd49-4cbc206b99d9
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	4dc09467-55e4-487b-a201-790e1a513f94
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	a83de682-d8cf-4f00-97c1-6399650c9717
+8dc56426-8493-40a6-9e50-c2fda0296ef3	23e8fa46-e737-4491-bd49-4cbc206b99d9
+8dc56426-8493-40a6-9e50-c2fda0296ef3	4efb90d1-e520-41da-90b1-89eb9cd7f890
+8dc56426-8493-40a6-9e50-c2fda0296ef3	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+8dc56426-8493-40a6-9e50-c2fda0296ef3	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+838627b1-e061-49c8-a8d9-74ec0a2ce772	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+838627b1-e061-49c8-a8d9-74ec0a2ce772	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+838627b1-e061-49c8-a8d9-74ec0a2ce772	fe441253-191f-4db6-b891-f718b34d2eef
+838627b1-e061-49c8-a8d9-74ec0a2ce772	d7a09596-9c5d-4859-8b15-5e7048a0c667
+838627b1-e061-49c8-a8d9-74ec0a2ce772	4efb90d1-e520-41da-90b1-89eb9cd7f890
+838627b1-e061-49c8-a8d9-74ec0a2ce772	a83de682-d8cf-4f00-97c1-6399650c9717
+08267f37-48f2-4e17-802c-357a7f61b2c0	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+08267f37-48f2-4e17-802c-357a7f61b2c0	a83de682-d8cf-4f00-97c1-6399650c9717
+08267f37-48f2-4e17-802c-357a7f61b2c0	d7a09596-9c5d-4859-8b15-5e7048a0c667
+4d6787bb-1050-4a47-af6d-3566b573738e	a83de682-d8cf-4f00-97c1-6399650c9717
+4d6787bb-1050-4a47-af6d-3566b573738e	23e8fa46-e737-4491-bd49-4cbc206b99d9
+4d6787bb-1050-4a47-af6d-3566b573738e	4dc09467-55e4-487b-a201-790e1a513f94
+877acd7d-a592-4d68-83f1-2cf2269769ff	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+877acd7d-a592-4d68-83f1-2cf2269769ff	23e8fa46-e737-4491-bd49-4cbc206b99d9
+877acd7d-a592-4d68-83f1-2cf2269769ff	d7a09596-9c5d-4859-8b15-5e7048a0c667
+877acd7d-a592-4d68-83f1-2cf2269769ff	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	23e8fa46-e737-4491-bd49-4cbc206b99d9
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	4efb90d1-e520-41da-90b1-89eb9cd7f890
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	4dc09467-55e4-487b-a201-790e1a513f94
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	fe441253-191f-4db6-b891-f718b34d2eef
+172296b2-7a08-46cc-9b87-125a6550a354	4dc09467-55e4-487b-a201-790e1a513f94
+172296b2-7a08-46cc-9b87-125a6550a354	23e8fa46-e737-4491-bd49-4cbc206b99d9
+172296b2-7a08-46cc-9b87-125a6550a354	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+172296b2-7a08-46cc-9b87-125a6550a354	fe441253-191f-4db6-b891-f718b34d2eef
+172296b2-7a08-46cc-9b87-125a6550a354	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+dca236b4-2560-4a97-9458-dedf938a19e9	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+dca236b4-2560-4a97-9458-dedf938a19e9	d7a09596-9c5d-4859-8b15-5e7048a0c667
+dca236b4-2560-4a97-9458-dedf938a19e9	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+dca236b4-2560-4a97-9458-dedf938a19e9	4efb90d1-e520-41da-90b1-89eb9cd7f890
+dca236b4-2560-4a97-9458-dedf938a19e9	23e8fa46-e737-4491-bd49-4cbc206b99d9
+31ae2e45-e459-4a72-913e-2d830af1a285	d7a09596-9c5d-4859-8b15-5e7048a0c667
+31ae2e45-e459-4a72-913e-2d830af1a285	4efb90d1-e520-41da-90b1-89eb9cd7f890
+31ae2e45-e459-4a72-913e-2d830af1a285	fe441253-191f-4db6-b891-f718b34d2eef
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	d7a09596-9c5d-4859-8b15-5e7048a0c667
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	4dc09467-55e4-487b-a201-790e1a513f94
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	a83de682-d8cf-4f00-97c1-6399650c9717
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	fe441253-191f-4db6-b891-f718b34d2eef
+5acc789e-a073-44af-886f-24286cf8bdd8	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+5acc789e-a073-44af-886f-24286cf8bdd8	fe441253-191f-4db6-b891-f718b34d2eef
+5acc789e-a073-44af-886f-24286cf8bdd8	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+5acc789e-a073-44af-886f-24286cf8bdd8	4dc09467-55e4-487b-a201-790e1a513f94
+5acc789e-a073-44af-886f-24286cf8bdd8	4efb90d1-e520-41da-90b1-89eb9cd7f890
+5acc789e-a073-44af-886f-24286cf8bdd8	23e8fa46-e737-4491-bd49-4cbc206b99d9
+d3ec2f62-a89d-4456-b4fc-7afd3537fd74	23e8fa46-e737-4491-bd49-4cbc206b99d9
+d3ec2f62-a89d-4456-b4fc-7afd3537fd74	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+d3ec2f62-a89d-4456-b4fc-7afd3537fd74	fe441253-191f-4db6-b891-f718b34d2eef
+d3ec2f62-a89d-4456-b4fc-7afd3537fd74	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+d3ec2f62-a89d-4456-b4fc-7afd3537fd74	4dc09467-55e4-487b-a201-790e1a513f94
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	d7a09596-9c5d-4859-8b15-5e7048a0c667
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	4dc09467-55e4-487b-a201-790e1a513f94
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	4efb90d1-e520-41da-90b1-89eb9cd7f890
+e0efb689-46f1-4278-9dde-5d8bf00cca7a	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+e0efb689-46f1-4278-9dde-5d8bf00cca7a	a83de682-d8cf-4f00-97c1-6399650c9717
+e0efb689-46f1-4278-9dde-5d8bf00cca7a	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+de2a2869-144e-4f0b-86d9-8dbecbe8f959	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+de2a2869-144e-4f0b-86d9-8dbecbe8f959	fe441253-191f-4db6-b891-f718b34d2eef
+de2a2869-144e-4f0b-86d9-8dbecbe8f959	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+de2a2869-144e-4f0b-86d9-8dbecbe8f959	4efb90d1-e520-41da-90b1-89eb9cd7f890
+de2a2869-144e-4f0b-86d9-8dbecbe8f959	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+1eda098f-9629-4188-bb7d-4daf8a499d0d	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+1eda098f-9629-4188-bb7d-4daf8a499d0d	4efb90d1-e520-41da-90b1-89eb9cd7f890
+1eda098f-9629-4188-bb7d-4daf8a499d0d	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+1eda098f-9629-4188-bb7d-4daf8a499d0d	4dc09467-55e4-487b-a201-790e1a513f94
+da563177-89d1-4f9e-b84f-eb6eb98a7f5a	a83de682-d8cf-4f00-97c1-6399650c9717
+da563177-89d1-4f9e-b84f-eb6eb98a7f5a	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+da563177-89d1-4f9e-b84f-eb6eb98a7f5a	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+da563177-89d1-4f9e-b84f-eb6eb98a7f5a	23e8fa46-e737-4491-bd49-4cbc206b99d9
+58fbe229-3cc7-413c-830b-ab59a5ab35cc	d7a09596-9c5d-4859-8b15-5e7048a0c667
+58fbe229-3cc7-413c-830b-ab59a5ab35cc	23e8fa46-e737-4491-bd49-4cbc206b99d9
+58fbe229-3cc7-413c-830b-ab59a5ab35cc	4dc09467-55e4-487b-a201-790e1a513f94
+58fbe229-3cc7-413c-830b-ab59a5ab35cc	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+58fbe229-3cc7-413c-830b-ab59a5ab35cc	fe441253-191f-4db6-b891-f718b34d2eef
+d0293ee4-aae2-4b1b-8731-1e87629287af	d7a09596-9c5d-4859-8b15-5e7048a0c667
+d0293ee4-aae2-4b1b-8731-1e87629287af	a83de682-d8cf-4f00-97c1-6399650c9717
+d0293ee4-aae2-4b1b-8731-1e87629287af	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+d0293ee4-aae2-4b1b-8731-1e87629287af	23e8fa46-e737-4491-bd49-4cbc206b99d9
+d0293ee4-aae2-4b1b-8731-1e87629287af	4efb90d1-e520-41da-90b1-89eb9cd7f890
+67be5272-f258-472c-9492-0f2fbe115c77	fe441253-191f-4db6-b891-f718b34d2eef
+67be5272-f258-472c-9492-0f2fbe115c77	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+67be5272-f258-472c-9492-0f2fbe115c77	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+67be5272-f258-472c-9492-0f2fbe115c77	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+67be5272-f258-472c-9492-0f2fbe115c77	4dc09467-55e4-487b-a201-790e1a513f94
+25b88400-d2d6-4544-8686-066ebe36a5d0	fe441253-191f-4db6-b891-f718b34d2eef
+25b88400-d2d6-4544-8686-066ebe36a5d0	a83de682-d8cf-4f00-97c1-6399650c9717
+25b88400-d2d6-4544-8686-066ebe36a5d0	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+86971d45-d08c-45d0-ad58-6995572b7b4a	4dc09467-55e4-487b-a201-790e1a513f94
+86971d45-d08c-45d0-ad58-6995572b7b4a	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+86971d45-d08c-45d0-ad58-6995572b7b4a	a83de682-d8cf-4f00-97c1-6399650c9717
+bdf399bf-a2c8-4d52-93b7-d9936179767f	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+bdf399bf-a2c8-4d52-93b7-d9936179767f	d7a09596-9c5d-4859-8b15-5e7048a0c667
+bdf399bf-a2c8-4d52-93b7-d9936179767f	4efb90d1-e520-41da-90b1-89eb9cd7f890
+bdf399bf-a2c8-4d52-93b7-d9936179767f	a83de682-d8cf-4f00-97c1-6399650c9717
+bdf399bf-a2c8-4d52-93b7-d9936179767f	fe441253-191f-4db6-b891-f718b34d2eef
+ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	d7a09596-9c5d-4859-8b15-5e7048a0c667
+eda678a8-ecbe-4a7d-a517-84ce4649ac3e	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+eda678a8-ecbe-4a7d-a517-84ce4649ac3e	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+eda678a8-ecbe-4a7d-a517-84ce4649ac3e	4dc09467-55e4-487b-a201-790e1a513f94
+eda678a8-ecbe-4a7d-a517-84ce4649ac3e	23e8fa46-e737-4491-bd49-4cbc206b99d9
+0ef7020c-f18d-4f65-b427-8e629460d11f	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+0ef7020c-f18d-4f65-b427-8e629460d11f	fe441253-191f-4db6-b891-f718b34d2eef
+0ef7020c-f18d-4f65-b427-8e629460d11f	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+0ef7020c-f18d-4f65-b427-8e629460d11f	a83de682-d8cf-4f00-97c1-6399650c9717
+0ef7020c-f18d-4f65-b427-8e629460d11f	4dc09467-55e4-487b-a201-790e1a513f94
+0ef7020c-f18d-4f65-b427-8e629460d11f	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+7c2f7e71-bc94-44d5-955c-cc6cb9cea057	4efb90d1-e520-41da-90b1-89eb9cd7f890
+7c2f7e71-bc94-44d5-955c-cc6cb9cea057	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+7c2f7e71-bc94-44d5-955c-cc6cb9cea057	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+7c2f7e71-bc94-44d5-955c-cc6cb9cea057	a83de682-d8cf-4f00-97c1-6399650c9717
+7c2f7e71-bc94-44d5-955c-cc6cb9cea057	4dc09467-55e4-487b-a201-790e1a513f94
+f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	4efb90d1-e520-41da-90b1-89eb9cd7f890
+f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	fe441253-191f-4db6-b891-f718b34d2eef
+f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	4dc09467-55e4-487b-a201-790e1a513f94
+f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	23e8fa46-e737-4491-bd49-4cbc206b99d9
+77f4a3cf-4e0d-4091-b680-544461ded840	23e8fa46-e737-4491-bd49-4cbc206b99d9
+77f4a3cf-4e0d-4091-b680-544461ded840	d7a09596-9c5d-4859-8b15-5e7048a0c667
+77f4a3cf-4e0d-4091-b680-544461ded840	fe441253-191f-4db6-b891-f718b34d2eef
+77f4a3cf-4e0d-4091-b680-544461ded840	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+6202da5e-fb9e-4176-91f6-d27f472a315c	23e8fa46-e737-4491-bd49-4cbc206b99d9
+6202da5e-fb9e-4176-91f6-d27f472a315c	d7a09596-9c5d-4859-8b15-5e7048a0c667
+6202da5e-fb9e-4176-91f6-d27f472a315c	a83de682-d8cf-4f00-97c1-6399650c9717
+3a8b8aa2-095a-4b85-81b0-16f329f41a4c	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+3a8b8aa2-095a-4b85-81b0-16f329f41a4c	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+3a8b8aa2-095a-4b85-81b0-16f329f41a4c	4efb90d1-e520-41da-90b1-89eb9cd7f890
+3a8b8aa2-095a-4b85-81b0-16f329f41a4c	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+3a8b8aa2-095a-4b85-81b0-16f329f41a4c	a83de682-d8cf-4f00-97c1-6399650c9717
+aaee4c46-75b7-4be6-af77-4f14533157cb	a83de682-d8cf-4f00-97c1-6399650c9717
+aaee4c46-75b7-4be6-af77-4f14533157cb	23e8fa46-e737-4491-bd49-4cbc206b99d9
+aaee4c46-75b7-4be6-af77-4f14533157cb	4efb90d1-e520-41da-90b1-89eb9cd7f890
+aaee4c46-75b7-4be6-af77-4f14533157cb	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+aaee4c46-75b7-4be6-af77-4f14533157cb	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+360ad8b5-3cf7-446b-974e-457f60b44d84	fe441253-191f-4db6-b891-f718b34d2eef
+360ad8b5-3cf7-446b-974e-457f60b44d84	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+360ad8b5-3cf7-446b-974e-457f60b44d84	a83de682-d8cf-4f00-97c1-6399650c9717
+360ad8b5-3cf7-446b-974e-457f60b44d84	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+c79d1ae4-b6d6-4f36-a03e-78a31da1937d	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+c79d1ae4-b6d6-4f36-a03e-78a31da1937d	a83de682-d8cf-4f00-97c1-6399650c9717
+c79d1ae4-b6d6-4f36-a03e-78a31da1937d	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+c79d1ae4-b6d6-4f36-a03e-78a31da1937d	d7a09596-9c5d-4859-8b15-5e7048a0c667
+a0765775-a111-47e5-99ce-723f5d4d3e37	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+a0765775-a111-47e5-99ce-723f5d4d3e37	fe441253-191f-4db6-b891-f718b34d2eef
+a0765775-a111-47e5-99ce-723f5d4d3e37	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+a0765775-a111-47e5-99ce-723f5d4d3e37	a83de682-d8cf-4f00-97c1-6399650c9717
+a0765775-a111-47e5-99ce-723f5d4d3e37	4efb90d1-e520-41da-90b1-89eb9cd7f890
+dc165584-65c4-481c-9ee9-78eeef588b91	23e8fa46-e737-4491-bd49-4cbc206b99d9
+dc165584-65c4-481c-9ee9-78eeef588b91	4dc09467-55e4-487b-a201-790e1a513f94
+dc165584-65c4-481c-9ee9-78eeef588b91	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+5688bfdd-2dab-4710-b028-c366fd11eb29	23e8fa46-e737-4491-bd49-4cbc206b99d9
+5688bfdd-2dab-4710-b028-c366fd11eb29	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+5688bfdd-2dab-4710-b028-c366fd11eb29	fe441253-191f-4db6-b891-f718b34d2eef
+5688bfdd-2dab-4710-b028-c366fd11eb29	d7a09596-9c5d-4859-8b15-5e7048a0c667
+5688bfdd-2dab-4710-b028-c366fd11eb29	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+5688bfdd-2dab-4710-b028-c366fd11eb29	4efb90d1-e520-41da-90b1-89eb9cd7f890
+e9f95823-4968-400d-9b80-93beba7f3496	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+e9f95823-4968-400d-9b80-93beba7f3496	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+e9f95823-4968-400d-9b80-93beba7f3496	4dc09467-55e4-487b-a201-790e1a513f94
+be04ab0c-a9b1-499b-a7a5-39666f4c263e	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+be04ab0c-a9b1-499b-a7a5-39666f4c263e	4dc09467-55e4-487b-a201-790e1a513f94
+be04ab0c-a9b1-499b-a7a5-39666f4c263e	4efb90d1-e520-41da-90b1-89eb9cd7f890
+be04ab0c-a9b1-499b-a7a5-39666f4c263e	a83de682-d8cf-4f00-97c1-6399650c9717
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	a83de682-d8cf-4f00-97c1-6399650c9717
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	23e8fa46-e737-4491-bd49-4cbc206b99d9
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	d7a09596-9c5d-4859-8b15-5e7048a0c667
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	4dc09467-55e4-487b-a201-790e1a513f94
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	23e8fa46-e737-4491-bd49-4cbc206b99d9
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	4efb90d1-e520-41da-90b1-89eb9cd7f890
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	d7a09596-9c5d-4859-8b15-5e7048a0c667
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+168d8ac6-b53c-49f7-a118-f75cbd32f357	23e8fa46-e737-4491-bd49-4cbc206b99d9
+168d8ac6-b53c-49f7-a118-f75cbd32f357	a83de682-d8cf-4f00-97c1-6399650c9717
+168d8ac6-b53c-49f7-a118-f75cbd32f357	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+168d8ac6-b53c-49f7-a118-f75cbd32f357	4dc09467-55e4-487b-a201-790e1a513f94
+168d8ac6-b53c-49f7-a118-f75cbd32f357	4efb90d1-e520-41da-90b1-89eb9cd7f890
+168d8ac6-b53c-49f7-a118-f75cbd32f357	d7a09596-9c5d-4859-8b15-5e7048a0c667
+aab2b4ca-3f30-457e-b758-e81a1b659586	4efb90d1-e520-41da-90b1-89eb9cd7f890
+aab2b4ca-3f30-457e-b758-e81a1b659586	23e8fa46-e737-4491-bd49-4cbc206b99d9
+aab2b4ca-3f30-457e-b758-e81a1b659586	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+aab2b4ca-3f30-457e-b758-e81a1b659586	d7a09596-9c5d-4859-8b15-5e7048a0c667
+aab2b4ca-3f30-457e-b758-e81a1b659586	4dc09467-55e4-487b-a201-790e1a513f94
+b9fac2b3-84e5-49aa-b868-b560edc50285	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+b9fac2b3-84e5-49aa-b868-b560edc50285	4efb90d1-e520-41da-90b1-89eb9cd7f890
+b9fac2b3-84e5-49aa-b868-b560edc50285	23e8fa46-e737-4491-bd49-4cbc206b99d9
+b9fac2b3-84e5-49aa-b868-b560edc50285	fe441253-191f-4db6-b891-f718b34d2eef
+0af916c8-e7a8-470a-8187-2fbf29b2fffc	23e8fa46-e737-4491-bd49-4cbc206b99d9
+0af916c8-e7a8-470a-8187-2fbf29b2fffc	4dc09467-55e4-487b-a201-790e1a513f94
+0af916c8-e7a8-470a-8187-2fbf29b2fffc	fe441253-191f-4db6-b891-f718b34d2eef
+0af916c8-e7a8-470a-8187-2fbf29b2fffc	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+881a5faa-67d5-4f23-8551-8488bee96d28	4efb90d1-e520-41da-90b1-89eb9cd7f890
+881a5faa-67d5-4f23-8551-8488bee96d28	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+881a5faa-67d5-4f23-8551-8488bee96d28	4dc09467-55e4-487b-a201-790e1a513f94
+881a5faa-67d5-4f23-8551-8488bee96d28	d7a09596-9c5d-4859-8b15-5e7048a0c667
+881a5faa-67d5-4f23-8551-8488bee96d28	a83de682-d8cf-4f00-97c1-6399650c9717
+881a5faa-67d5-4f23-8551-8488bee96d28	fe441253-191f-4db6-b891-f718b34d2eef
+8689265e-80b2-43f0-a206-3d2ab45344c0	4dc09467-55e4-487b-a201-790e1a513f94
+8689265e-80b2-43f0-a206-3d2ab45344c0	a83de682-d8cf-4f00-97c1-6399650c9717
+8689265e-80b2-43f0-a206-3d2ab45344c0	4efb90d1-e520-41da-90b1-89eb9cd7f890
+3c30c794-aa08-495f-a1fd-3e8969786720	a83de682-d8cf-4f00-97c1-6399650c9717
+3c30c794-aa08-495f-a1fd-3e8969786720	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+3c30c794-aa08-495f-a1fd-3e8969786720	4efb90d1-e520-41da-90b1-89eb9cd7f890
+3c30c794-aa08-495f-a1fd-3e8969786720	fe441253-191f-4db6-b891-f718b34d2eef
+df270160-7bbc-4841-9bff-d908ede11f1c	d7a09596-9c5d-4859-8b15-5e7048a0c667
+df270160-7bbc-4841-9bff-d908ede11f1c	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+df270160-7bbc-4841-9bff-d908ede11f1c	23e8fa46-e737-4491-bd49-4cbc206b99d9
+df270160-7bbc-4841-9bff-d908ede11f1c	fe441253-191f-4db6-b891-f718b34d2eef
+df270160-7bbc-4841-9bff-d908ede11f1c	a83de682-d8cf-4f00-97c1-6399650c9717
+e5a15f48-b33a-48ee-a722-881fe2eb6a44	4dc09467-55e4-487b-a201-790e1a513f94
+e5a15f48-b33a-48ee-a722-881fe2eb6a44	23e8fa46-e737-4491-bd49-4cbc206b99d9
+e5a15f48-b33a-48ee-a722-881fe2eb6a44	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+e5a15f48-b33a-48ee-a722-881fe2eb6a44	a83de682-d8cf-4f00-97c1-6399650c9717
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	d7a09596-9c5d-4859-8b15-5e7048a0c667
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	4dc09467-55e4-487b-a201-790e1a513f94
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	4efb90d1-e520-41da-90b1-89eb9cd7f890
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	fe441253-191f-4db6-b891-f718b34d2eef
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+52f8be12-ab6d-4964-91a9-d7ab053c98a0	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+52f8be12-ab6d-4964-91a9-d7ab053c98a0	a83de682-d8cf-4f00-97c1-6399650c9717
+52f8be12-ab6d-4964-91a9-d7ab053c98a0	4efb90d1-e520-41da-90b1-89eb9cd7f890
+52f8be12-ab6d-4964-91a9-d7ab053c98a0	d7a09596-9c5d-4859-8b15-5e7048a0c667
+52f8be12-ab6d-4964-91a9-d7ab053c98a0	4dc09467-55e4-487b-a201-790e1a513f94
+2180a99f-675a-486e-84c4-a9d300196aaa	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+2180a99f-675a-486e-84c4-a9d300196aaa	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+2180a99f-675a-486e-84c4-a9d300196aaa	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+2180a99f-675a-486e-84c4-a9d300196aaa	4efb90d1-e520-41da-90b1-89eb9cd7f890
+2180a99f-675a-486e-84c4-a9d300196aaa	fe441253-191f-4db6-b891-f718b34d2eef
+2180a99f-675a-486e-84c4-a9d300196aaa	4dc09467-55e4-487b-a201-790e1a513f94
+5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	fe441253-191f-4db6-b891-f718b34d2eef
+5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	d7a09596-9c5d-4859-8b15-5e7048a0c667
+5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+d23078db-dbd7-454e-a881-9d43d4a79338	fe441253-191f-4db6-b891-f718b34d2eef
+d23078db-dbd7-454e-a881-9d43d4a79338	23e8fa46-e737-4491-bd49-4cbc206b99d9
+d23078db-dbd7-454e-a881-9d43d4a79338	4dc09467-55e4-487b-a201-790e1a513f94
+8feeffdc-45ef-4903-b234-007c83e339d4	23e8fa46-e737-4491-bd49-4cbc206b99d9
+8feeffdc-45ef-4903-b234-007c83e339d4	fe441253-191f-4db6-b891-f718b34d2eef
+8feeffdc-45ef-4903-b234-007c83e339d4	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+8feeffdc-45ef-4903-b234-007c83e339d4	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+c1c52b86-2ef1-4cac-b064-422db103e400	d7a09596-9c5d-4859-8b15-5e7048a0c667
+c1c52b86-2ef1-4cac-b064-422db103e400	4dc09467-55e4-487b-a201-790e1a513f94
+c1c52b86-2ef1-4cac-b064-422db103e400	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+c1c52b86-2ef1-4cac-b064-422db103e400	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+c1c52b86-2ef1-4cac-b064-422db103e400	fe441253-191f-4db6-b891-f718b34d2eef
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	fe441253-191f-4db6-b891-f718b34d2eef
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	4dc09467-55e4-487b-a201-790e1a513f94
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	d7a09596-9c5d-4859-8b15-5e7048a0c667
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	4efb90d1-e520-41da-90b1-89eb9cd7f890
+5c98650c-4713-463d-9f0d-70579dc6acce	d7a09596-9c5d-4859-8b15-5e7048a0c667
+5c98650c-4713-463d-9f0d-70579dc6acce	23e8fa46-e737-4491-bd49-4cbc206b99d9
+5c98650c-4713-463d-9f0d-70579dc6acce	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+5c98650c-4713-463d-9f0d-70579dc6acce	a83de682-d8cf-4f00-97c1-6399650c9717
+1bce9114-d641-4411-9796-875b0dc39816	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+1bce9114-d641-4411-9796-875b0dc39816	fe441253-191f-4db6-b891-f718b34d2eef
+1bce9114-d641-4411-9796-875b0dc39816	4dc09467-55e4-487b-a201-790e1a513f94
+1bce9114-d641-4411-9796-875b0dc39816	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+1bce9114-d641-4411-9796-875b0dc39816	4efb90d1-e520-41da-90b1-89eb9cd7f890
+1bce9114-d641-4411-9796-875b0dc39816	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+f1a1647e-d051-4f50-806a-75d6739aa6a2	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+f1a1647e-d051-4f50-806a-75d6739aa6a2	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+f1a1647e-d051-4f50-806a-75d6739aa6a2	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+f1a1647e-d051-4f50-806a-75d6739aa6a2	fe441253-191f-4db6-b891-f718b34d2eef
+f1a1647e-d051-4f50-806a-75d6739aa6a2	4dc09467-55e4-487b-a201-790e1a513f94
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	4dc09467-55e4-487b-a201-790e1a513f94
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	d7a09596-9c5d-4859-8b15-5e7048a0c667
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	4efb90d1-e520-41da-90b1-89eb9cd7f890
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	a83de682-d8cf-4f00-97c1-6399650c9717
+386b2a26-14e4-4bce-822f-0ce5b3e7ad80	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+386b2a26-14e4-4bce-822f-0ce5b3e7ad80	d7a09596-9c5d-4859-8b15-5e7048a0c667
+386b2a26-14e4-4bce-822f-0ce5b3e7ad80	4dc09467-55e4-487b-a201-790e1a513f94
+386b2a26-14e4-4bce-822f-0ce5b3e7ad80	a83de682-d8cf-4f00-97c1-6399650c9717
+386b2a26-14e4-4bce-822f-0ce5b3e7ad80	4efb90d1-e520-41da-90b1-89eb9cd7f890
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	a83de682-d8cf-4f00-97c1-6399650c9717
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	fe441253-191f-4db6-b891-f718b34d2eef
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	4dc09467-55e4-487b-a201-790e1a513f94
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	d7a09596-9c5d-4859-8b15-5e7048a0c667
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	d7a09596-9c5d-4859-8b15-5e7048a0c667
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	4dc09467-55e4-487b-a201-790e1a513f94
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	a83de682-d8cf-4f00-97c1-6399650c9717
+219abcd8-74c6-4610-875f-0fbfdeff29ae	a83de682-d8cf-4f00-97c1-6399650c9717
+219abcd8-74c6-4610-875f-0fbfdeff29ae	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+219abcd8-74c6-4610-875f-0fbfdeff29ae	d7a09596-9c5d-4859-8b15-5e7048a0c667
+b4be8b62-a621-454f-9607-83124238f496	4dc09467-55e4-487b-a201-790e1a513f94
+b4be8b62-a621-454f-9607-83124238f496	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+b4be8b62-a621-454f-9607-83124238f496	23e8fa46-e737-4491-bd49-4cbc206b99d9
+9510b658-38b5-461f-b657-84781a2e3127	fe441253-191f-4db6-b891-f718b34d2eef
+9510b658-38b5-461f-b657-84781a2e3127	a83de682-d8cf-4f00-97c1-6399650c9717
+9510b658-38b5-461f-b657-84781a2e3127	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+9510b658-38b5-461f-b657-84781a2e3127	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+937505b1-971e-4d0f-982b-e3987adb7e80	23e8fa46-e737-4491-bd49-4cbc206b99d9
+937505b1-971e-4d0f-982b-e3987adb7e80	fe441253-191f-4db6-b891-f718b34d2eef
+937505b1-971e-4d0f-982b-e3987adb7e80	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+9bfc5a90-20bf-4922-9060-1a065e69ba00	4efb90d1-e520-41da-90b1-89eb9cd7f890
+9bfc5a90-20bf-4922-9060-1a065e69ba00	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+9bfc5a90-20bf-4922-9060-1a065e69ba00	d7a09596-9c5d-4859-8b15-5e7048a0c667
+9bfc5a90-20bf-4922-9060-1a065e69ba00	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+2cb8ba85-6423-45dc-8a0e-c5854d2499cf	d7a09596-9c5d-4859-8b15-5e7048a0c667
+2cb8ba85-6423-45dc-8a0e-c5854d2499cf	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+2cb8ba85-6423-45dc-8a0e-c5854d2499cf	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+2cb8ba85-6423-45dc-8a0e-c5854d2499cf	23e8fa46-e737-4491-bd49-4cbc206b99d9
+0717200b-f3d2-469a-967d-16ece3900c10	23e8fa46-e737-4491-bd49-4cbc206b99d9
+0717200b-f3d2-469a-967d-16ece3900c10	4efb90d1-e520-41da-90b1-89eb9cd7f890
+0717200b-f3d2-469a-967d-16ece3900c10	fe441253-191f-4db6-b891-f718b34d2eef
+f1cd504c-2bcc-4607-acac-04cdf23188de	23e8fa46-e737-4491-bd49-4cbc206b99d9
+f1cd504c-2bcc-4607-acac-04cdf23188de	d7a09596-9c5d-4859-8b15-5e7048a0c667
+f1cd504c-2bcc-4607-acac-04cdf23188de	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+2ad90f0e-f60f-4944-bc96-23c176c4e241	4efb90d1-e520-41da-90b1-89eb9cd7f890
+2ad90f0e-f60f-4944-bc96-23c176c4e241	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+2ad90f0e-f60f-4944-bc96-23c176c4e241	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+2ad90f0e-f60f-4944-bc96-23c176c4e241	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+2ad90f0e-f60f-4944-bc96-23c176c4e241	4dc09467-55e4-487b-a201-790e1a513f94
+51aa216e-e168-49d2-a909-14737e69e518	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+51aa216e-e168-49d2-a909-14737e69e518	23e8fa46-e737-4491-bd49-4cbc206b99d9
+51aa216e-e168-49d2-a909-14737e69e518	d7a09596-9c5d-4859-8b15-5e7048a0c667
+51aa216e-e168-49d2-a909-14737e69e518	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+51aa216e-e168-49d2-a909-14737e69e518	4efb90d1-e520-41da-90b1-89eb9cd7f890
+eddfcab7-9942-4beb-ae93-ef4235cb1f75	4dc09467-55e4-487b-a201-790e1a513f94
+eddfcab7-9942-4beb-ae93-ef4235cb1f75	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+eddfcab7-9942-4beb-ae93-ef4235cb1f75	fe441253-191f-4db6-b891-f718b34d2eef
+039d05f4-b152-47cd-9115-7d50c896fe90	fe441253-191f-4db6-b891-f718b34d2eef
+039d05f4-b152-47cd-9115-7d50c896fe90	4dc09467-55e4-487b-a201-790e1a513f94
+039d05f4-b152-47cd-9115-7d50c896fe90	d7a09596-9c5d-4859-8b15-5e7048a0c667
+039d05f4-b152-47cd-9115-7d50c896fe90	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+039d05f4-b152-47cd-9115-7d50c896fe90	4efb90d1-e520-41da-90b1-89eb9cd7f890
+bf317b54-d0ae-49b3-b6b1-1c9218480ec8	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+bf317b54-d0ae-49b3-b6b1-1c9218480ec8	fe441253-191f-4db6-b891-f718b34d2eef
+bf317b54-d0ae-49b3-b6b1-1c9218480ec8	4dc09467-55e4-487b-a201-790e1a513f94
+bf317b54-d0ae-49b3-b6b1-1c9218480ec8	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+bf317b54-d0ae-49b3-b6b1-1c9218480ec8	4efb90d1-e520-41da-90b1-89eb9cd7f890
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	a83de682-d8cf-4f00-97c1-6399650c9717
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	4dc09467-55e4-487b-a201-790e1a513f94
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	d7a09596-9c5d-4859-8b15-5e7048a0c667
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+f3b0f0a1-179b-4814-b3b0-f138120e03cb	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+f3b0f0a1-179b-4814-b3b0-f138120e03cb	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+f3b0f0a1-179b-4814-b3b0-f138120e03cb	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+f3b0f0a1-179b-4814-b3b0-f138120e03cb	d7a09596-9c5d-4859-8b15-5e7048a0c667
+f3b0f0a1-179b-4814-b3b0-f138120e03cb	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+fb36c869-cc19-4183-87e3-2d1cd682ee2d	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+fb36c869-cc19-4183-87e3-2d1cd682ee2d	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+fb36c869-cc19-4183-87e3-2d1cd682ee2d	4efb90d1-e520-41da-90b1-89eb9cd7f890
+fb36c869-cc19-4183-87e3-2d1cd682ee2d	d7a09596-9c5d-4859-8b15-5e7048a0c667
+779924a4-9fdf-45f6-97d9-7ac8fa69532b	23e8fa46-e737-4491-bd49-4cbc206b99d9
+779924a4-9fdf-45f6-97d9-7ac8fa69532b	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+779924a4-9fdf-45f6-97d9-7ac8fa69532b	fe441253-191f-4db6-b891-f718b34d2eef
+3435409c-54c1-4823-ae45-b7f6b2b4ffd6	a83de682-d8cf-4f00-97c1-6399650c9717
+3435409c-54c1-4823-ae45-b7f6b2b4ffd6	d7a09596-9c5d-4859-8b15-5e7048a0c667
+3435409c-54c1-4823-ae45-b7f6b2b4ffd6	7e78a3cf-5068-4adb-a42d-354cf0fcd008
+3435409c-54c1-4823-ae45-b7f6b2b4ffd6	23e8fa46-e737-4491-bd49-4cbc206b99d9
+950a1f8c-6d74-4b32-a4e3-f3c6a4973d6f	c1f6f92f-af8c-4ecd-9bc6-5e401c99e2f2
+950a1f8c-6d74-4b32-a4e3-f3c6a4973d6f	fe441253-191f-4db6-b891-f718b34d2eef
+950a1f8c-6d74-4b32-a4e3-f3c6a4973d6f	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+86eb76c6-edb7-49b1-8c55-ac6236b66957	d7a09596-9c5d-4859-8b15-5e7048a0c667
+86eb76c6-edb7-49b1-8c55-ac6236b66957	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+86eb76c6-edb7-49b1-8c55-ac6236b66957	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+86eb76c6-edb7-49b1-8c55-ac6236b66957	4efb90d1-e520-41da-90b1-89eb9cd7f890
+86eb76c6-edb7-49b1-8c55-ac6236b66957	a83de682-d8cf-4f00-97c1-6399650c9717
+d83e5082-a03d-4e1c-918a-37d17b0d8995	d7a09596-9c5d-4859-8b15-5e7048a0c667
+d83e5082-a03d-4e1c-918a-37d17b0d8995	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+d83e5082-a03d-4e1c-918a-37d17b0d8995	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+d83e5082-a03d-4e1c-918a-37d17b0d8995	4efb90d1-e520-41da-90b1-89eb9cd7f890
+d83e5082-a03d-4e1c-918a-37d17b0d8995	a83de682-d8cf-4f00-97c1-6399650c9717
+dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	d7a09596-9c5d-4859-8b15-5e7048a0c667
+dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	5f1b8f62-61a5-44c1-9dd4-a4ce8bc1ae52
+dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	5e6f2fce-25dd-4edc-b064-fe4ba0cb2a6d
+dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	4efb90d1-e520-41da-90b1-89eb9cd7f890
+dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	a83de682-d8cf-4f00-97c1-6399650c9717
+\.
+
+-- ── stays ──
+COPY stays (id, name, description, region, address, lat, lng, price_per_night, max_guests, rating, review_count, host_id, created_at) FROM stdin;
+9cb96a8c-68f4-4f87-ba50-34b23e1249aa	호텔 리베라 강남	강남 중심가에 위치한 모던한 비즈니스 호텔입니다. 세련된 인테리어와 편안한 객실로 여유로운 휴식을 제공합니다.	서울	서울특별시 강남구 테헤란로 120	37.5056	127.0966	280000	4	4.5	142	3285c0d3-e31c-4d88-81e8-cf36297ed99c	2026-05-04 09:08:10.198646
+a92817ec-6965-47ef-bf9d-9809d9fa42ae	선릉 마루 모텔	지하철 선릉역 도보 3분 거리의 실속있는 모텔입니다. 깔끔한 시설과 합리적인 가격으로 많은 사랑을 받고 있습니다.	서울	서울특별시 강남구 선릉로 428	37.6422	126.9453	65000	2	4	95	e3e34a70-a49c-402a-a4b2-a6c753a8b113	2026-05-04 09:09:48.769636
+1a568fb4-84d5-4b61-a5c7-144321eda70b	그랜드 인터컨티넨탈 파르나스	코엑스몰과 직접 연결된 럭셔리 5성급 호텔입니다. 최상급 서비스와 품격 있는 다이닝을 경험하실 수 있습니다.	서울	서울특별시 강남구 테헤란로 521	37.4904	126.9947	950000	6	4.8	138	54a58365-f204-450c-a206-8277052f53ad	2026-05-04 09:11:08.240104
+b7160a1a-901d-4569-a8f2-f5a9a7ab623e	노블레스 호텔	강남역 인근에 위치한 부티크 호텔입니다. 스타일리시한 객실과 루프탑 라운지가 매력적입니다.	서울	서울특별시 강남구 강남대로 328	37.5024	127.0889	320000	3	4.2	112	17bf1100-6428-48ae-a459-02a9a9dce5c8	2026-05-04 09:12:53.142398
+1ac108fc-359e-4045-aa3e-94066fd9d2d9	역삼 스카이뷰 레지던스	역삼동 중심가의 고급 레지던스형 호텔입니다. 넓은 객실과 도시 전망이 일품입니다.	서울	서울특별시 강남구 역삼로 142	37.4676	126.8716	450000	5	4.6	128	025ec64f-79c8-438f-a848-e005cf765f78	2026-05-04 09:14:16.272376
+1ef0c576-a2c5-4ba8-a151-85dfe865487f	삼성동 하이 모텔	삼성중앙역 근처의 깔끔한 모텔입니다. 24시간 무인 체크인 시스템으로 편리하게 이용하실 수 있습니다.	서울	서울특별시 강남구 삼성로 326	37.5692	127.139	55000	2	3.8	86	9b34df7a-f43b-42d2-86ba-4091f6decf6f	2026-05-04 09:15:59.341012
+9f1b56e8-fff8-42d5-b421-1b3045236300	파크 하얏트 서울	삼성동 무역센터 내에 위치한 초호화 호텔입니다. 최고급 스파와 미쉐린 스타 레스토랑을 보유하고 있습니다.	서울	서울특별시 강남구 테헤란로 606	37.5829	126.8989	980000	8	4.9	145	bc5e2f49-8ec5-4a8d-a958-8a487bfb8643	2026-05-04 09:16:54.326135
+a7fbefbc-c1d1-41a1-ada7-acec62048f2f	청담 메이플 호텔	청담동 명품거리에 위치한 디자인 호텔입니다. 예술적인 인테리어와 프라이빗한 분위기가 특징입니다.	서울	서울특별시 강남구 청담동 84-9	37.6114	126.9729	420000	4	4.4	98	70285632-4ed0-4e94-beb6-6f1c0ee4c210	2026-05-04 09:18:58.680286
+e497fb6f-c7bb-4e34-b943-421b29ecc4f9	논현 베니스 모텔	논현역 5분 거리의 합리적인 모텔입니다. 최근 리모델링으로 더욱 쾌적해진 환경을 자랑합니다.	서울	서울특별시 강남구 논현로 164	37.4723	126.9571	70000	2	3.9	82	00ab70b6-b8d3-4bcd-aa15-0477212a2a8e	2026-05-04 09:20:11.23284
+e9f9ec13-9207-4cfa-8255-3a2668fadae9	앰배서더 풀만 호텔	삼성동 도심에 위치한 비즈니스급 호텔입니다. 국제회의 시설과 다양한 연회장을 갖추고 있습니다.	서울	서울특별시 강남구 삼성로 176	37.5455	127.025	580000	6	4.7	134	d30834f8-22c3-4aa8-ab2b-4d521ff874ab	2026-05-04 09:21:03.262687
+f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	메이필드 호텔 영등포	영등포 중심가에 위치한 비즈니스급 호텔입니다. 현대적인 인테리어와 편안한 객실로 여행객들에게 최적의 휴식을 제공합니다.	서울	서울특별시 영등포구 여의대로 108	37.5489	127.0088	280000	4	4.5	142	2d291236-3093-4802-9cd5-b7647e6dc2a9	2026-05-04 09:22:45.660066
+8d6d5122-6bcb-40d4-8a58-b43cdb967885	타임스퀘어 레지던스	타임스퀘어 쇼핑몰과 직접 연결된 프리미엄 레지던스입니다. 넓은 객실과 최신식 시설을 갖추고 있어 장기 투숙에도 적합합니다.	서울	서울특별시 영등포구 영중로 15	37.4786	127.004	450000	6	4.8	128	5e5a2c40-baf1-4384-9e47-7b7ee67e692b	2026-05-04 09:24:19.245176
+242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	굿모닝 모텔	영등포역 도보 3분 거리에 위치한 실속형 모텔입니다. 깔끔한 객실과 친절한 서비스로 여행객들의 사랑을 받고 있습니다.	서울	서울특별시 영등포구 영등포로42길 12	37.5991	127.0873	65000	2	3.9	95	00aaa984-4431-49c6-bd34-dd844daed20c	2026-05-04 09:25:53.084748
+0d16c734-b953-4830-9fbb-0f2ba421f6b8	블루밍 모텔	영등포역 도보 3분 거리에 위치한 아늑한 모텔입니다. 깔끔한 인테리어와 친절한 서비스로 많은 고객님들의 사랑을 받고 있습니다.	서울	서울특별시 영등포구 영등포로42길 12	37.5573	126.8728	65000	2	4.2	125	4631c5b5-c956-4036-80b7-d110e6da9f66	2026-05-04 09:27:31.387747
+fafc92a2-31f7-472a-8eb5-5a16012d9005	라온 모텔	타임스퀘어 인근에 위치한 모던한 스타일의 모텔입니다. 최신식 시설과 넓은 주차공간을 갖추고 있습니다.	서울	서울특별시 영등포구 경인로 846	37.5744	126.9967	75000	3	4.5	142	6044753b-7484-4650-92ca-91b224d96395	2026-05-04 09:29:12.479532
+b383ceef-b5c7-49b3-80d9-d287ec062c0a	하이드 모텔	영등포시장역 근처의 프리미엄 모텔입니다. 고급스러운 인테리어와 쾌적한 환경을 자랑합니다.	서울	서울특별시 영등포구 영중로 15	37.5646	127.1073	85000	2	4.7	98	8c606b11-79c9-40f0-8691-36e6cdc6c8ac	2026-05-04 09:30:36.820854
+236c38f8-a7de-428b-9b73-63bd854975ac	스카이뷰 모텔	여의도 한강공원이 보이는 전망 좋은 모텔입니다. 커플룸부터 가족룸까지 다양한 객실을 보유하고 있습니다.	서울	서울특별시 영등포구 여의대방로 375	37.5952	127.0073	95000	4	4.3	115	0b1e4a06-5313-41fd-b213-dc1a4d5908c7	2026-05-04 09:31:42.366512
+359fa56a-bf69-44ed-9586-0a18a6f6f9fe	더원 모텔	문래역 도보 5분 거리의 모던한 모텔입니다. 깨끗한 시설과 합리적인 가격으로 많은 분들이 찾습니다.	서울	서울특별시 영등포구 도림로 266	37.6318	127.1365	55000	2	4	88	ee6741f9-5abd-4c5e-8493-1af0dda745ef	2026-05-04 09:32:54.178934
+beb5fb68-68d3-43f3-8aac-6d445a82e1a8	호텔리안	영등포구청역 인근의 럭셔리한 모텔입니다. 호텔급 서비스와 시설을 자랑하는 프리미엄 숙소입니다.	서울	서울특별시 영등포구 양산로 96	37.5784	126.9792	120000	3	4.8	135	9e40c95d-3c7b-437b-b98d-e7db1be02d4e	2026-05-04 09:33:53.736937
+cd28e925-c07d-4115-9230-1f2e991b665e	에이스 모텔	영등포동에 위치한 실용적인 모텔입니다. 24시간 편의점과 주차장 이용이 가능합니다.	서울	서울특별시 영등포구 영등포로 208	37.5793	127.1389	60000	2	3.9	95	87da7871-76b0-4fe3-9edb-24fb3438e2a7	2026-05-04 09:35:40.335704
+1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	써니데이 모텔	대림역 근처의 밝고 깔끔한 모텔입니다. 친절한 직원들과 청결한 객실 관리가 특징입니다.	서울	서울특별시 영등포구 대림로 157	37.5709	127.1089	70000	2	4.1	112	a71c236c-1ff1-41e2-a536-ab36744dd22b	2026-05-04 09:36:40.04606
+94f5f0a9-115e-4c78-be1a-8f92dc2640be	로얄 모텔	신도림역 도보 거리에 위치한 고급 모텔입니다. 스파 시설과 미니바가 구비된 럭셔리한 객실을 제공합니다.	서울	서울특별시 영등포구 신도림로 185	37.4869	126.8867	110000	4	4.6	145	23ff2a4e-635b-4ba9-9195-d26aa7ba9c40	2026-05-04 09:37:53.658188
+2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	뉴스타 모텔	영등포시장 인근의 실속있는 모텔입니다. 깔끔한 시설과 저렴한 가격으로 많은 분들이 이용하십니다.	서울	서울특별시 영등포구 영등포로34길 9	37.4521	127.0239	58000	2	3.8	82	341f0d81-fea3-46aa-8e17-0c5c7d7d4683	2026-05-04 09:39:37.340563
+bf609333-bb05-450d-b9ef-29b0e6b47563	종로 스카이 모텔	조용하고 아늑한 분위기의 모던한 모텔입니다. 깨끗한 객실과 친절한 서비스로 많은 고객님들께 사랑받고 있습니다.	서울	서울특별시 종로구 종로33길 15	37.4534	127.0443	65000	2	4.2	127	b250968e-a401-4b85-a852-c8866f55f0ca	2026-05-04 09:40:35.330396
+6a493540-58bc-4f9e-83fd-e56254d70913	궁전파크 모텔	경복궁역 도보 3분 거리에 위치한 접근성 좋은 모텔입니다. 최근 리모델링으로 더욱 쾌적한 환경을 제공합니다.	서울	서울특별시 종로구 삼봉로 81	37.564	127.0785	75000	3	4.5	142	1f11e639-8eca-4b6b-9b99-cb874aa08560	2026-05-04 09:42:10.015411
+dccd1b8d-a5b4-4990-b769-cf664a1e8511	로얄스위트 모텔	종로3가 중심가에 위치한 프리미엄 모텔입니다. 넓은 객실과 고급스러운 인테리어로 특별한 경험을 선사합니다.	서울	서울특별시 종로구 돈화문로 26	37.5961	126.9431	85000	4	4.7	96	025ec64f-79c8-438f-a848-e005cf765f78	2026-05-04 09:43:45.14466
+40d604e2-f942-4507-bcb5-1683ae90353c	용산 하얏트 리조트	남산의 아름다운 전망을 자랑하는 프리미엄 리조트입니다. 최상급 스파 시설과 미슐랭 레스토랑을 갖추고 있습니다.	서울	서울특별시 용산구 소월로 322	37.5468	127.1325	850000	6	4.8	142	ec342ef5-43a7-4f43-9bc5-eb97d0fbd7eb	2026-05-04 09:45:18.752482
+d638547b-4035-4287-acd0-86ca7c24a68b	이태원 힐 리조트	이태원의 중심부에 위치한 모던한 디자인의 리조트입니다. 루프탑 수영장에서 서울 야경을 감상할 수 있습니다.	서울	서울특별시 용산구 이태원로 179	37.6189	126.9316	450000	4	4.5	128	54a58365-f204-450c-a206-8277052f53ad	2026-05-04 09:47:14.67621
+9ba5de3d-fad4-4ce8-839b-bbdb3670626b	드래곤 밸리 리조트	용산역 인근에 위치한 비즈니스 친화적 리조트입니다. 최신식 컨퍼런스 시설과 피트니스 센터를 보유하고 있습니다.	서울	서울특별시 용산구 한강대로 372	37.5225	126.9592	580000	5	4.6	135	6936a4ec-0ca1-4339-b18e-2f51e4ba9397	2026-05-04 09:48:56.97484
+a525650c-75f9-4334-a196-cd0958a8b9d1	남산 뷰 리조트	남산 케이블카와 가까운 위치의 전통적인 한옥 스타일 리조트입니다. 한국적인 정취와 현대적인 편의시설이 조화를 이룹니다.	서울	서울특별시 용산구 소월로 285	37.5301	126.896	680000	4	4.7	145	23d6288d-17f9-4587-9717-c11296611338	2026-05-04 09:50:26.628132
+485e38aa-abdc-45e4-9464-f7d285d4691f	리버사이드 힐튼 리조트	한강이 내려다보이는 최고급 리조트입니다. 실내 수영장과 미슐랭 스타 셰프의 레스토랑을 즐기실 수 있습니다.	서울	서울특별시 용산구 이촌로 271	37.566	126.9805	920000	8	4.9	149	3e2e513e-de9c-43a3-8919-29f1c4d17bf7	2026-05-04 09:52:19.311973
+e3d4c901-3e76-443d-91ec-d773b6ec2ce0	센트럴 파크 리조트	용산파크 인근의 현대적인 디자인 리조트입니다. 도심 속 휴식을 위한 실내 정원과 스파 시설을 제공합니다.	서울	서울특별시 용산구 녹사평대로 230	37.4801	126.8554	420000	4	4.3	112	074f87a4-91e2-4a36-bc32-e8531adb58cf	2026-05-04 09:54:16.221023
+4b9de8d3-ffed-41c1-87a8-290aaf859845	삼각지 스위트 리조트	비즈니스 지구 중심에 위치한 모던한 리조트입니다. 24시간 비즈니스 센터와 고급 레스토랑을 운영합니다.	서울	서울특별시 용산구 한강대로 180	37.5555	126.8765	380000	3	4.2	95	f932748d-e945-441c-aeb5-4e69037da881	2026-05-04 09:55:33.761153
+64c39003-d9dd-4d23-ba12-3ef937497e60	해방촌 부티크 리조트	해방촌의 독특한 문화를 느낄 수 있는 아트 리조트입니다. 각 객실마다 다른 테마로 꾸며진 예술적 공간을 제공합니다.	서울	서울특별시 용산구 신흥로 59	37.5958	126.8571	290000	2	4.4	88	f24d54d7-6b1b-46f9-b99d-00e6f3e1fe51	2026-05-04 09:56:40.535372
+7a663c92-4bd6-4138-b863-90cee940de7e	경리단길 시그니처 리조트	경리단길의 트렌디한 분위기를 담은 디자인 리조트입니다. 루프탑 바와 아티스트 갤러리를 운영합니다.	서울	서울특별시 용산구 녹사평대로 54길 43	37.5206	127.0038	350000	3	4.5	102	707c6040-7c77-4803-80e5-d11e7362a310	2026-05-04 09:57:44.249896
+1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	용산 파크 리조트	용산공원과 인접한 친환경 리조트입니다. 자연 친화적 디자인과 유기농 레스토랑이 특징입니다.	서울	서울특별시 용산구 서빙고로 137	37.4739	127.0904	480000	5	4.6	118	f112525e-39cf-47c3-950c-d858c0d45be7	2026-05-04 09:59:09.019156
+8dc56426-8493-40a6-9e50-c2fda0296ef3	더 힐 앤 포레스트	서초의 아름다운 자연 속에 자리잡은 프리미엄 리조트입니다. 도심에서 멀지 않으면서도 완벽한 휴식을 제공하는 최상급 시설을 갖추고 있습니다.	서울	서울특별시 서초구 헌릉로 290	37.5569	126.9769	780000	6	4.7	127	8c640ab9-551b-471d-8498-8ec7f492dced	2026-05-04 10:00:44.314415
+838627b1-e061-49c8-a8d9-74ec0a2ce772	서초 그랜드 리조트	우면산의 수려한 경관이 펼쳐지는 도심형 리조트입니다. 스파와 야외 수영장을 갖춘 고급스러운 휴식 공간을 제공합니다.	서울	서울특별시 서초구 매헌로 16	37.5864	127.109	650000	4	4.5	142	c1ea95ca-0e74-41f3-bb89-4d92f06e8298	2026-05-04 10:02:26.464757
+08267f37-48f2-4e17-802c-357a7f61b2c0	서초힐스 펜션	우면산 자락에 위치한 프리미엄 통나무 펜션입니다. 도심 속 자연을 느낄 수 있는 최적의 휴식 공간을 제공합니다.	서울	서울특별시 서초구 매헌로 16길 32	37.5603	126.9068	280000	4	4.7	122	85dce64e-7a3f-4726-bf21-0f5fd4e8cd2f	2026-05-04 10:04:36.451245
+4d6787bb-1050-4a47-af6d-3566b573738e	양재숲 글램핑	양재시민의숲 인근에 위치한 도심 속 글램핑장입니다. 캠핑의 즐거움과 호텔의 편안함을 동시에 누릴 수 있습니다.	서울	서울특별시 서초구 양재동 236-12	37.4807	127.0279	180000	3	4.2	95	55f339f0-0a1e-4292-a53e-9fb81bb53ded	2026-05-04 10:06:00.061137
+877acd7d-a592-4d68-83f1-2cf2269769ff	서리풀 리조트	서초의 중심부에 위치한 프리미엄 리조트입니다. 최신식 스파 시설과 아늑한 객실을 갖추고 있습니다.	서울	서울특별시 서초구 서초대로 345	37.5267	127.0565	450000	6	4.8	143	c1ea95ca-0e74-41f3-bb89-4d92f06e8298	2026-05-04 10:07:23.428322
+2bec3081-d55e-469a-bbc3-e2d10a391fbc	방배 가든 펜션	방배동의 조용한 주택가에 위치한 아담한 펜션입니다. 작은 정원과 바베큐 시설을 갖추고 있습니다.	서울	서울특별시 서초구 방배로 167	37.6109	127.0205	150000	4	4.1	88	144b1e8e-dbcc-4f6f-80a4-5c434276ec13	2026-05-04 10:08:55.755674
+172296b2-7a08-46cc-9b87-125a6550a354	예술의전당 스테이	예술의전당 근처에 위치한 모던한 스타일의 숙소입니다. 예술적 감각이 돋보이는 인테리어가 특징입니다.	서울	서울특별시 서초구 남부순환로 2406	37.5731	126.8965	220000	3	4.5	112	3b8d72ac-e880-4ad8-900a-82e8cc9f2b7a	2026-05-04 10:09:55.545097
+dca236b4-2560-4a97-9458-dedf938a19e9	내곡 힐링하우스	내곡동의 한적한 곳에 자리잡은 독채 펜션입니다. 도시의 喧囂를 벗어나 진정한 휴식을 취할 수 있습니다.	서울	서울특별시 서초구 내곡동 1-285	37.6259	127.0247	330000	5	4.6	97	cea8edbe-b399-45ac-ad65-c32f05a8202b	2026-05-04 10:11:21.494922
+31ae2e45-e459-4a72-913e-2d830af1a285	반포한강 뷰펜션	반포한강공원이 내려다보이는 고층 펜션입니다. 환상적인 야경과 함께 특별한 추억을 만들 수 있습니다.	서울	서울특별시 서초구 신반포로 194	37.6125	127.1323	420000	4	4.9	135	56b118e4-adf5-4cae-b301-3f810d425221	2026-05-04 10:12:35.269264
+75bd83aa-441d-4cda-b3ed-8cf88df1d083	서초 포레스트	우면산 등산로 입구에 위치한 자연친화적 펜션입니다. 숲속 새소리를 들으며 맑은 공기를 마실 수 있습니다.	서울	서울특별시 서초구 우면동 445-8	37.5942	127.0109	290000	5	4.4	103	a71c236c-1ff1-41e2-a536-ab36744dd22b	2026-05-04 10:14:09.147955
+5acc789e-a073-44af-886f-24286cf8bdd8	양재 리버사이드	양재천변에 위치한 모던한 펜션입니다. 도심 속 작은 하천과 함께하는 휴식을 즐길 수 있습니다.	서울	서울특별시 서초구 양재동 12-9	37.6266	127.1019	250000	4	4.3	91	959faf55-a8c1-479b-b49a-be48d4c03f7a	2026-05-04 10:15:19.691794
+d3ec2f62-a89d-4456-b4fc-7afd3537fd74	서초 럭셔리 스위트	서초동의 중심가에 위치한 고급 스위트룸입니다. 호텔급 서비스와 안락한 시설을 제공합니다.	서울	서울특별시 서초구 서초중앙로 114	37.5212	127.0733	580000	6	4.8	148	d1015eb2-abc8-4a76-b871-f383f323bab7	2026-05-04 10:16:27.024014
+6561bbcf-f3d6-42d6-9f59-b157e9f72429	서리풀 힐 펜션	서초의 조용한 언덕에 자리잡은 프리미엄 펜션입니다. 도심 속 아늑한 휴식처로 야경이 매력적인 곳입니다.	서울	서울특별시 서초구 서리풀길 45-12	37.5007	127.0701	280000	4	4.7	124	c203fe17-c310-45eb-a1de-f96faf2b3cae	2026-05-04 10:18:08.5474
+e0efb689-46f1-4278-9dde-5d8bf00cca7a	양재숲 글램핑 펜션	양재시민의숲 근처에 위치한 도심 속 글램핑 펜션입니다. 바비큐와 캠핑의 즐거움을 도심에서 느낄 수 있습니다.	서울	서울특별시 서초구 매헌로 124-5	37.5306	126.9157	350000	6	4.3	92	6936a4ec-0ca1-4339-b18e-2f51e4ba9397	2026-05-04 10:19:39.629261
+de2a2869-144e-4f0b-86d9-8dbecbe8f959	스테이 인 제주	연동의 중심가에 위치한 모던한 감성의 호텔입니다. 제주 바다가 보이는 오션뷰 객실을 보유하고 있습니다.	제주	제주특별자치도 제주시 연동 263-10	33.3387	126.9003	85000	2	4.2	87	3817839e-1e10-4894-be27-6b4d3285e0aa	2026-05-04 10:21:10.907499
+1eda098f-9629-4188-bb7d-4daf8a499d0d	더 프리미어 제주호텔	고급스러운 인테리어와 최신식 시설을 갖춘 비즈니스 호텔입니다. 연동 중앙로에서 도보 3분 거리에 위치해 있습니다.	제주	제주특별자치도 제주시 연동 301-4	33.2088	126.3814	220000	4	4.7	112	6bef8a6e-91c4-4e1e-b1a0-ab9584ee2bb8	2026-05-04 10:22:17.366156
+da563177-89d1-4f9e-b84f-eb6eb98a7f5a	연동 리젠트 호텔	공항과 가까운 위치에 자리잡은 4성급 호텔입니다. 넓은 주차장과 레스토랑을 운영하고 있습니다.	제주	제주특별자치도 제주시 연동 294-7	33.4377	126.9466	165000	3	4.4	95	6da09ac3-01f9-467b-ae06-22df1f1937d2	2026-05-04 10:23:40.43297
+58fbe229-3cc7-413c-830b-ab59a5ab35cc	제주 마린 리조트	해변과 인접한 고급 리조트입니다. 수영장과 스파 시설을 갖추고 있습니다.	제주	제주특별자치도 제주시 연동 312-1	33.3512	126.6127	450000	6	4.8	103	230bd024-69a9-4618-a9d9-4d1f9b2c6da8	2026-05-04 10:24:51.862696
+d0293ee4-aae2-4b1b-8731-1e87629287af	연동 게스트하우스	저렴한 가격에 깔끔한 숙박을 제공하는 게스트하우스입니다. 공용 주방과 세탁 시설이 있습니다.	제주	제주특별자치도 제주시 연동 272-15	33.2037	126.8978	55000	2	4	76	fc5d6571-0611-4c7e-8088-e0c1579da222	2026-05-04 10:26:19.945592
+67be5272-f258-472c-9492-0f2fbe115c77	그랜드 제주 호텔	연동 번화가에 위치한 5성급 호텔입니다. 럭셔리한 객실과 컨퍼런스 시설을 보유하고 있습니다.	제주	제주특별자치도 제주시 연동 288-5	33.3164	126.7492	780000	8	4.9	118	7bb886df-5be1-493b-8cc6-58b451301a41	2026-05-04 10:27:27.923586
+25b88400-d2d6-4544-8686-066ebe36a5d0	제주 썬라이즈 모텔	깨끗하고 실용적인 객실을 제공하는 모텔입니다. 24시간 리셉션 서비스를 운영합니다.	제주	제주특별자치도 제주시 연동 267-8	33.3264	126.4879	65000	2	3.8	82	17bf1100-6428-48ae-a459-02a9a9dce5c8	2026-05-04 10:28:51.934226
+86971d45-d08c-45d0-ad58-6995572b7b4a	하버뷰 호텔	제주항이 내려다보이는 전망 좋은 호텔입니다. 루프탑 바와 레스토랑을 운영하고 있습니다.	제주	제주특별자치도 제주시 연동 305-3	33.492	126.1836	290000	4	4.5	91	7d7b3c15-7ffe-41cf-a17e-0562c7cc5b3a	2026-05-04 10:29:45.568085
+bdf399bf-a2c8-4d52-93b7-d9936179767f	한림오션뷰모텔	한림항이 내려다보이는 오션뷰 객실을 보유한 모텔입니다. 깔끔한 인테리어와 친절한 서비스로 여행객들에게 인기가 많습니다.	제주	제주특별자치도 제주시 한림읍 한림해안로 127	33.339	126.487	65000	2	4.2	87	0b7718f1-73fb-4430-a99d-10c22b61de82	2026-05-04 10:31:16.043028
+ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	더블루하우스	협재해수욕장 도보 5분 거리에 위치한 아늑한 모텔입니다. 전 객실 바다 전망과 테라스를 갖추고 있습니다.	제주	제주특별자치도 제주시 한림읍 협재1길 45	33.3663	126.5232	85000	3	4.5	112	697d5960-8b67-4992-842d-3b2c7da08020	2026-05-04 10:32:29.825503
+eda678a8-ecbe-4a7d-a517-84ce4649ac3e	썬라이즈모텔	금능해수욕장 인근의 조용한 모텔입니다. 넓은 주차장과 바베큐 시설을 무료로 이용할 수 있습니다.	제주	제주특별자치도 제주시 한림읍 금능길 28	33.2917	126.8654	55000	2	3.8	76	c203fe17-c310-45eb-a1de-f96faf2b3cae	2026-05-04 10:34:03.642314
+0ef7020c-f18d-4f65-b427-8e629460d11f	한림비치호텔	한림항 앞에 위치한 비즈니스급 모텔입니다. 모든 객실에 미니바와 와이파이가 무료로 제공됩니다.	제주	제주특별자치도 제주시 한림읍 한림해안로 143	33.466	126.3245	95000	4	4.3	94	5c3d84ab-9858-436b-876f-6be6d4ebe9fe	2026-05-04 10:35:03.50134
+7c2f7e71-bc94-44d5-955c-cc6cb9cea057	그린파크모텔	한림공원 근처에 위치한 친환경 콘셉트의 모텔입니다. 옥상 정원에서 아름다운 일몰을 감상할 수 있습니다.	제주	제주특별자치도 제주시 한림읍 한림로 356	33.4006	126.5385	75000	3	4	82	70a569d6-b85b-446c-910a-8d02b31b6e76	2026-05-04 10:36:19.564633
+f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	씨사이드인	협재해수욕장이 보이는 곳에 위치한 모던한 모텔입니다. 투숙객을 위한 조식 서비스를 제공합니다.	제주	제주특별자치도 제주시 한림읍 협재로 216	33.2864	126.3197	88000	4	4.4	98	87da7871-76b0-4fe3-9edb-24fb3438e2a7	2026-05-04 10:37:21.028397
+77f4a3cf-4e0d-4091-b680-544461ded840	골드문모텔	금능해수욕장 5분 거리의 신축 모텔입니다. 각 객실마다 다른 테마로 꾸며진 특색있는 인테리어가 특징입니다.	제주	제주특별자치도 제주시 한림읍 금능남로 47	33.2082	126.7476	79000	2	4.1	67	f932748d-e945-441c-aeb5-4e69037da881	2026-05-04 10:38:31.538221
+6202da5e-fb9e-4176-91f6-d27f472a315c	한림스카이모텔	한림읍 중심가에 위치한 깔끔한 모텔입니다. 편의점과 식당가가 가까워 접근성이 좋습니다.	제주	제주특별자치도 제주시 한림읍 한림중앙로 85	33.5307	126.6609	68000	3	3.9	73	b51f0a76-5141-43e1-bc0a-bf3497423405	2026-05-04 10:39:22.603905
+3a8b8aa2-095a-4b85-81b0-16f329f41a4c	성산 오션 리조트	성산일출봉이 한눈에 보이는 프리미엄 오션뷰 리조트입니다. 전 객실 바다 전망과 현대적인 인테리어로 고급스러운 휴식을 제공합니다.	제주	제주특별자치도 서귀포시 성산읍 일출로 284	33.2385	126.3311	850000	6	4.8	112	5bb7149e-7547-42a8-82db-79c532b9a81c	2026-05-04 10:40:32.139564
+aaee4c46-75b7-4be6-af77-4f14533157cb	해온비치 펜션	아늑한 분위기의 독채형 펜션입니다. 우도와 성산일출봉을 조망할 수 있는 최적의 위치에 자리잡고 있습니다.	제주	제주특별자치도 서귀포시 성산읍 신양로 107	33.2401	126.2972	180000	4	4.2	87	c88da191-926c-4a87-be99-6934277a57ad	2026-05-04 10:42:03.505573
+360ad8b5-3cf7-446b-974e-457f60b44d84	섭지코지 스위트호텔	섭지코지 해변과 가까운 럭셔리 호텔입니다. 스파와 인피니티 풀을 갖춘 최고급 시설을 자랑합니다.	제주	제주특별자치도 서귀포시 성산읍 섭지코지로 99	33.3137	126.2215	950000	4	4.9	98	b0a76681-f7c2-454a-81ed-373a00993834	2026-05-04 10:43:20.576826
+c79d1ae4-b6d6-4f36-a03e-78a31da1937d	선라이즈 모텔	깔끔하고 실속있는 숙박시설입니다. 성산항과 가까워 관광하기 좋은 위치에 있습니다.	제주	제주특별자치도 서귀포시 성산읍 성산중앙로 52	33.3472	126.9041	65000	2	3.8	76	198b65f2-2cf7-4d11-b500-679595ac3540	2026-05-04 10:44:34.462067
+a0765775-a111-47e5-99ce-723f5d4d3e37	아쿠아마린 리조트	광활한 오션뷰와 프라이빗 비치를 보유한 고급 리조트입니다. 계절별 해양 액티비티를 즐길 수 있는 프리미엄 시설을 갖추고 있습니다.	제주	제주특별자치도 서귀포시 성산읍 해맞이해안로 2108	33.5154	126.2256	780000	8	4.7	104	c1b9a962-2007-4e22-86d8-554c683ce7c8	2026-05-04 10:45:26.001172
+dc165584-65c4-481c-9ee9-78eeef588b91	성산포 게스트하우스	아기자기한 인테리어의 감성숙소입니다. 성산일출봉과 우도 여행객들에게 인기 있는 합리적인 숙소입니다.	제주	제주특별자치도 서귀포시 성산읍 성산중앙로 33	33.4183	126.4545	55000	2	4	92	f24d54d7-6b1b-46f9-b99d-00e6f3e1fe51	2026-05-04 10:46:54.006625
+5688bfdd-2dab-4710-b028-c366fd11eb29	바다풍경 리조트	제주 동부의 아름다운 해안가에 위치한 중형 리조트입니다. 편안한 객실과 함께 야외 바베큐 시설을 제공합니다.	제주	제주특별자치도 서귀포시 성산읍 동류암로 127	33.3469	126.2842	450000	6	4.3	83	def67892-7e7b-446a-9d9a-78127ea16a3a	2026-05-04 10:48:04.381884
+e9f95823-4968-400d-9b80-93beba7f3496	성산해물펜션	성산일출봉이 한눈에 보이는 바닷가 펜션입니다. 깨끗하고 아늑한 객실에서 제주의 푸른 바다를 감상하실 수 있습니다.	제주	제주특별자치도 서귀포시 성산읍 해맞이해안로 2641	33.3981	126.3785	120000	4	4.5	89	ed22d2f6-678a-485d-9e36-3afe3c942c2b	2026-05-04 10:49:25.549135
+be04ab0c-a9b1-499b-a7a5-39666f4c263e	일출오름스테이	성산일출봉 등반로 입구에서 도보 5분 거리에 위치한 아담한 펜션입니다. 전 객실 오션뷰로 아침 일출을 방에서 감상할 수 있습니다.	제주	제주특별자치도 서귀포시 성산읍 일출로 284-12	33.2898	126.6633	180000	3	4.7	112	55f339f0-0a1e-4292-a53e-9fb81bb53ded	2026-05-04 10:50:23.810057
+d4fc2ff7-c765-434a-b087-d05e3e8be6a1	섭지팰리스	섭지코지 해변가에 자리잡은 럭셔리 펜션입니다. 프라이빗 풀장과 함께 최상의 휴식을 제공합니다.	제주	제주특별자치도 서귀포시 성산읍 섭지코지로 107	33.3518	126.5683	450000	6	4.8	95	af6ce151-c2c2-48f3-a6af-3c2e689495e4	2026-05-04 10:51:51.010602
+0a922ede-1c2a-43b5-a5db-b8b8031c80d5	해뜨는마을펜션	조용한 마을에 위치한 가족형 펜션입니다. 넓은 잔디마당에서 바베큐 파티를 즐기실 수 있습니다.	제주	제주특별자치도 서귀포시 성산읍 신양로 98-11	33.4641	126.6669	150000	5	4.2	76	1da4cdba-423c-44fb-ac92-d2822809a56c	2026-05-04 10:53:05.588284
+168d8ac6-b53c-49f7-a118-f75cbd32f357	오션뷰리조트	우도가 보이는 최고급 오션뷰 리조트입니다. 테라스에서 즐기는 환상적인 일출과 함께 특별한 추억을 만드세요.	제주	제주특별자치도 서귀포시 성산읍 동해로 11-3	33.5297	126.8502	680000	8	4.9	103	b207630b-0614-4ade-8707-b54aa40cfc1b	2026-05-04 10:54:11.440266
+aab2b4ca-3f30-457e-b758-e81a1b659586	은하수가든	올레길 1코스 시작점 근처에 위치한 아늑한 펜션입니다. 정원에서 바라보는 밤하늘의 별들이 매력적입니다.	제주	제주특별자치도 서귀포시 성산읍 성산중앙로 52	33.2698	126.9345	95000	2	4	67	85dce64e-7a3f-4726-bf21-0f5fd4e8cd2f	2026-05-04 10:55:42.397891
+b9fac2b3-84e5-49aa-b868-b560edc50285	성산포하버뷰	성산포항이 내려다보이는 고급 펜션입니다. 현대적인 인테리어와 최신 시설을 갖추고 있습니다.	제주	제주특별자치도 서귀포시 성산읍 성산등용로 13-7	33.2866	126.4002	250000	4	4.6	84	581f636b-a7b4-454c-bffa-b66694f406bd	2026-05-04 10:56:36.705951
+0af916c8-e7a8-470a-8187-2fbf29b2fffc	기장 해송 호텔	아름다운 일광해수욕장이 도보 3분 거리에 있는 프리미엄 호텔입니다. 전 객실 오션뷰로 멋진 일출을 감상하실 수 있습니다.	부산	부산광역시 기장군 일광읍 이천길 100	35.2178	129.1989	280000	4	4.5	72	6217c95f-c69b-4090-a1e5-c41b9af55409	2026-05-04 10:57:54.710415
+881a5faa-67d5-4f23-8551-8488bee96d28	더 마린 리조트	기장 앞바다를 조망할 수 있는 럭셔리 리조트입니다. 수영장과 사우나 시설을 완비하고 있습니다.	부산	부산광역시 기장군 기장읍 기장해안로 328-12	35.1337	129.0406	450000	6	4.8	65	f112525e-39cf-47c3-950c-d858c0d45be7	2026-05-04 10:59:00.726678
+8689265e-80b2-43f0-a206-3d2ab45344c0	해운대 씨사이드 모텔	기장 시내와 가깝고 접근성이 좋은 실속형 숙소입니다. 깔끔한 인테리어와 친절한 서비스가 특징입니다.	부산	부산광역시 기장군 기장읍 차성로 441	35.1309	128.9862	85000	2	3.8	45	5bb7149e-7547-42a8-82db-79c532b9a81c	2026-05-04 10:59:47.728556
+3c30c794-aa08-495f-a1fd-3e8969786720	기장 힐튼 리조트	최고급 시설과 서비스를 자랑하는 5성급 호텔입니다. 프라이빗 비치와 골프장을 보유하고 있습니다.	부산	부산광역시 기장군 일광읍 해빛로 1256	35.1327	129.083	880000	8	4.9	78	4ebe250f-1caf-4229-a3d1-ee0794f6af52	2026-05-04 11:00:21.057651
+df270160-7bbc-4841-9bff-d908ede11f1c	오션 팰리스 호텔	기장 해안가에 위치한 중급 호텔입니다. 합리적인 가격에 쾌적한 숙박을 즐기실 수 있습니다.	부산	부산광역시 기장군 기장읍 기장해안로 248	35.241	129.0757	180000	4	4.2	58	6044753b-7484-4650-92ca-91b224d96395	2026-05-04 11:01:19.080406
+e5a15f48-b33a-48ee-a722-881fe2eb6a44	해운대 블루오션 모텔	깔끔한 인테리어와 아늑한 분위기의 모텔입니다. 해운대 해수욕장과 도보 5분 거리에 위치해 있습니다.	부산	부산광역시 해운대구 중동1로 33	35.1198	129.1789	65000	2	4.2	52	a8c615af-6114-4e56-b786-a4343296a6c6	2026-05-04 11:02:22.698487
+08cc31b6-7fd7-4d03-8772-fce84cf69fc2	씨뷰 모텔	탁 트인 오션뷰를 자랑하는 프리미엄 모텔입니다. 모던한 객실과 쾌적한 환경을 제공합니다.	부산	부산광역시 해운대구 해운대해변로 287	35.1617	128.9935	85000	3	4.5	73	8c606b11-79c9-40f0-8691-36e6cdc6c8ac	2026-05-04 11:03:02.277043
+52f8be12-ab6d-4964-91a9-d7ab053c98a0	썬라이즈 모텔	해운대 중심가에 위치한 실속형 모텔입니다. 깨끗한 시설과 친절한 서비스가 특징입니다.	부산	부산광역시 해운대구 구남로 28	35.2214	129.1412	55000	2	3.8	45	0d7b4016-fba4-4c3d-baaa-a688b136e11a	2026-05-04 11:03:59.324536
+2180a99f-675a-486e-84c4-a9d300196aaa	로얄 모텔	고급스러운 인테리어와 넓은 객실을 갖춘 프리미엄 모텔입니다. 커플과 가족 모두에게 인기가 많습니다.	부산	부산광역시 해운대구 중동2로 11	35.1369	128.9733	95000	4	4.7	68	64529bf0-b625-4399-ba56-ad44ae32485b	2026-05-04 11:04:26.43151
+5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	마린시티 모텔	마린시티 인근의 현대적인 감각의 모텔입니다. 야경이 아름답고 조용한 휴식을 취하기 좋습니다.	부산	부산광역시 해운대구 마린시티2로 33	35.248	128.9805	75000	3	4.3	61	56b118e4-adf5-4cae-b301-3f810d425221	2026-05-04 11:05:09.889
+d23078db-dbd7-454e-a881-9d43d4a79338	오션뷰 프리미엄 리조트	광안대교가 한눈에 보이는 최고급 오션뷰 리조트입니다. 모든 객실에서 바다를 조망할 수 있으며 고급 스파 시설을 완비하고 있습니다.	부산	부산광역시 남구 광안해변로 219	35.0649	129.0481	850000	4	4.8	76	83dde9bb-4549-4fef-a35c-871a8ea0a44a	2026-05-04 11:06:11.553218
+8feeffdc-45ef-4903-b234-007c83e339d4	남천 힐사이드 리조트	남천동 언덕에 자리잡은 프라이빗 리조트입니다. 도심 속 휴양을 즐길 수 있는 최적의 장소로 수영장과 피트니스 센터를 갖추고 있습니다.	부산	부산광역시 남구 남천동로 95	35.1815	129.0437	680000	6	4.5	63	d1015eb2-abc8-4a76-b871-f383f323bab7	2026-05-04 11:07:12.464279
+c1c52b86-2ef1-4cac-b064-422db103e400	더 마린 베이 리조트	용호만을 내려다보는 특급 해양리조트입니다. 전 객실 오션뷰와 함께 최신식 웰니스 시설을 제공합니다.	부산	부산광역시 남구 용호로 232	35.0828	128.9824	920000	8	4.9	71	6044753b-7484-4650-92ca-91b224d96395	2026-05-04 11:08:03.265832
+d7d55482-6b1a-42af-85e4-8bc3dd3a3582	문현 시티 리조트	도심 속 비즈니스와 휴식을 동시에 즐길 수 있는 현대적인 리조트입니다. 편리한 교통과 함께 세련된 인테리어가 특징입니다.	부산	부산광역시 남구 문현금융로 40	35.2138	129.1628	450000	3	4.2	52	341f0d81-fea3-46aa-8e17-0c5c7d7d4683	2026-05-04 11:09:00.289567
+5c98650c-4713-463d-9f0d-70579dc6acce	대연 파크 리조트	대연동 공원 근처에 위치한 가족형 리조트입니다. 넓은 정원과 키즈룸을 갖추고 있어 가족 여행객들에게 인기가 높습니다.	부산	부산광역시 남구 대연동로 85	35.1649	129.1635	580000	6	4.4	58	87da7871-76b0-4fe3-9edb-24fb3438e2a7	2026-05-04 11:09:40.620634
+1bce9114-d641-4411-9796-875b0dc39816	해운대 블루오션 펜션	바다가 한눈에 보이는 프리미엄 오션뷰 펜션입니다. 모던한 인테리어와 넓은 테라스에서 여유로운 휴식을 즐기실 수 있습니다.	부산	부산광역시 해운대구 달맞이길 306	35.0532	128.9734	280000	4	4.7	62	07189d92-5ffe-421d-9237-efdbf4c5e518	2026-05-04 11:10:33.916333
+f1a1647e-d051-4f50-806a-75d6739aa6a2	송정 씨사이드 하우스	송정해수욕장 도보 3분 거리의 아늑한 펜션입니다. 바다 향기와 함께하는 특별한 추억을 만들어보세요.	부산	부산광역시 해운대구 송정해변로 20	35.1678	129.1014	150000	3	4.2	45	4fd883fa-1501-45b9-8bf6-05baf6f3023f	2026-05-04 11:11:32.167432
+8b234c5b-0097-42d9-8c56-5c3327fa4e46	달맞이 힐 펜션	달맞이고개에 위치한 럭셔리 독채 펜션입니다. 프라이빗 풀장과 함께 최상의 휴식을 제공합니다.	부산	부산광역시 해운대구 달맞이길 379	35.2012	129.1256	450000	6	4.9	73	a3416657-9eec-4a8d-9df3-7c6f544ad767	2026-05-04 11:12:05.826414
+386b2a26-14e4-4bce-822f-0ce5b3e7ad80	해운대 마린 빌라	해운대 해수욕장이 내려다보이는 고급 빌라형 펜션입니다. 최신식 시설과 넓은 주차장을 완비했습니다.	부산	부산광역시 해운대구 해운대해변로 287	35.2274	129.0765	350000	5	4.5	58	d76c3416-e83c-4dcf-919b-73f87dce7bf1	2026-05-04 11:13:05.044231
+d7c76c61-a6be-4de2-93cc-3880c170b2f8	미포 선셋 펜션	미포항 인근의 아담한 가족형 펜션입니다. 전 객실 바다 전망과 바비큐 시설을 갖추고 있습니다.	부산	부산광역시 해운대구 미포만해변로 30	35.2014	129.1421	180000	4	4.3	51	f24d54d7-6b1b-46f9-b99d-00e6f3e1fe51	2026-05-04 11:13:59.82875
+dad3c35c-9f56-48fa-b4ca-edf394d870a1	호텔 라메르	세련된 인테리어와 아늑한 객실을 갖춘 비즈니스 호텔입니다. 광천터미널과 가까워 교통이 매우 편리합니다.	광주	광주광역시 서구 죽봉대로 68	35.133	126.8643	85000	3	4.2	24	c88da191-926c-4a87-be99-6934277a57ad	2026-05-04 11:14:52.377993
+219abcd8-74c6-4610-875f-0fbfdeff29ae	라페스타 모텔	깔끔하고 모던한 스타일의 모텔로 커플들에게 인기가 많습니다. 주변에 맛집과 카페가 많아 데이트하기 좋은 위치에 있습니다.	광주	광주광역시 서구 상무중앙로 42	35.1074	126.944	55000	2	3.8	18	8a90628b-33d1-4549-8c88-ad7bddca8861	2026-05-04 11:15:12.22513
+b4be8b62-a621-454f-9607-83124238f496	그랜드 풀빌라	럭셔리한 수영장과 자쿠지를 갖춘 프리미엄 풀빌라입니다. 넓은 객실과 최신식 시설로 특별한 휴식을 제공합니다.	광주	광주광역시 서구 천변좌하로 316	35.1064	126.8524	450000	6	4.7	15	c41ad25a-3c06-4fcc-8d60-2da9c77b07d9	2026-05-04 11:15:26.722153
+9510b658-38b5-461f-b657-84781a2e3127	블루문모텔	아늑한 분위기의 실속있는 모텔입니다. 깔끔한 인테리어와 친절한 서비스로 많은 고객님들의 사랑을 받고 있습니다.	광주	광주광역시 남구 봉선로 128	35.1889	126.8871	55000	2	4.2	28	0b650186-ff9a-4d65-9595-a94919ae2423	2026-05-04 11:15:50.138138
+937505b1-971e-4d0f-982b-e3987adb7e80	달빛하우스	최신 시설을 갖춘 프리미엄 모텔입니다. 쾌적한 환경과 고급스러운 인테리어로 특별한 휴식을 제공합니다.	광주	광주광역시 남구 서문대로 419	35.1405	126.9065	75000	3	4.5	15	dcae1d70-7a09-4a87-b719-daaeebe9d798	2026-05-04 11:16:11.259666
+9bfc5a90-20bf-4922-9060-1a065e69ba00	힐링스테이	편안한 휴식을 위한 모든 것이 준비된 모텔입니다. 넓은 객실과 최신식 시설로 편안한 숙박을 보장합니다.	광주	광주광역시 남구 독립로 123	35.1847	126.8978	65000	2	4	22	6e8473e5-7328-484a-bf29-73768816013f	2026-05-04 11:16:29.19289
+2cb8ba85-6423-45dc-8a0e-c5854d2499cf	무등파크리조트	무등산이 한눈에 보이는 전망 좋은 리조트입니다. 넓은 객실과 쾌적한 시설로 편안한 휴식을 제공합니다.	광주	광주광역시 북구 무등로 1283	35.149	126.9242	280000	6	4.5	28	af7e0c3a-3820-4d0f-a950-ac0610e3554e	2026-05-04 11:16:51.877403
+0717200b-f3d2-469a-967d-16ece3900c10	광주로얄리조트	도심 속 휴양을 즐길 수 있는 프리미엄 리조트입니다. 수영장과 사우나 시설을 갖추고 있어 사계절 내내 즐거운 시간을 보낼 수 있습니다.	광주	광주광역시 북구 면앙로 122	35.1374	126.8684	350000	4	4.2	15	2d291236-3093-4802-9cd5-b7647e6dc2a9	2026-05-04 11:17:13.116429
+f1cd504c-2bcc-4607-acac-04cdf23188de	남광주 힐링펜션	조용한 주택가에 위치한 아늑한 펜션입니다. 넓은 정원과 바베큐 시설을 갖추고 있어 가족 단위 여행객에게 인기가 많습니다.	광주	광주광역시 남구 봉선중앙로 98번길 12	35.1714	126.8756	180000	6	4.3	24	a158e564-274e-4766-9770-37930a5b1684	2026-05-04 11:17:31.312174
+2ad90f0e-f60f-4944-bc96-23c176c4e241	무등산뷰 하우스	무등산이 한눈에 보이는 프리미엄 펜션입니다. 현대적인 인테리어와 온수 스파를 완비하여 커플 여행객들에게 특히 사랑받고 있습니다.	광주	광주광역시 남구 효우로 357	35.1199	126.8755	250000	4	4.7	18	fafdfb85-00bc-4d2f-b38b-d7cdeaf3b29c	2026-05-04 11:17:54.252697
+51aa216e-e168-49d2-a909-14737e69e518	금일도 해변호텔	아름다운 다도해를 조망할 수 있는 오션뷰 호텔입니다. 깔끔한 객실과 친절한 서비스로 편안한 휴식을 제공합니다.	완도	전라남도 완도군 금일읍 금일로 365	34.3669	126.7878	120000	4	4.3	12	8f9bc723-11b4-44fb-aceb-fca200433be3	2026-05-04 11:18:18.821745
+eddfcab7-9942-4beb-ae93-ef4235cb1f75	금진리조트	금일도의 자연을 만끽할 수 있는 프리미엄 리조트입니다. 수영장과 레스토랑을 갖추고 있어 완벽한 휴가를 보낼 수 있습니다.	완도	전라남도 완도군 금일읍 금동로 278-15	34.4202	126.7143	280000	6	4.7	15	6217c95f-c69b-4090-a1e5-c41b9af55409	2026-05-04 11:18:29.042078
+039d05f4-b152-47cd-9115-7d50c896fe90	금일바다모텔	저렴한 가격에 편안한 숙박을 제공하는 깔끔한 모텔입니다. 주변에 맛집과 관광지가 많아 접근성이 좋습니다.	완도	전라남도 완도군 금일읍 금일로 412	34.312	126.7314	55000	2	3.8	8	eb25c513-215d-4f75-8e00-63f708134914	2026-05-04 11:18:43.133465
+bf317b54-d0ae-49b3-b6b1-1c9218480ec8	하이클래스 모텔	완도항이 내려다보이는 오션뷰 객실을 보유하고 있습니다. 깔끔한 인테리어와 친절한 서비스로 편안한 휴식을 제공합니다.	완도	전라남도 완도군 완도읍 개포로 62	34.3481	126.7909	65000	2	4.2	12	70a569d6-b85b-446c-910a-8d02b31b6e76	2026-05-04 11:18:59.270727
+9b3012bc-af0d-4a8b-a1cb-670b641fa525	블루문 모텔	완도읍 중심가에 위치한 모던한 스타일의 모텔입니다. 넓은 주차장과 24시간 데스크 서비스를 제공합니다.	완도	전라남도 완도군 완도읍 군내리 1089-1	34.4409	126.7573	55000	3	4	8	0ea738d2-9694-49c5-8c23-31154a077ca9	2026-05-04 11:19:07.902031
+f3b0f0a1-179b-4814-b3b0-f138120e03cb	씨밀레 모텔	완도버스터미널 인근에 위치한 깔끔한 모텔입니다. 각 객실마다 다양한 테마로 꾸며져 있어 색다른 경험을 제공합니다.	완도	전라남도 완도군 완도읍 중앙길 45	34.3669	126.7611	70000	2	4.5	15	300908cb-270c-4a61-9a6f-755818774dd6	2026-05-04 11:19:17.2438
+fb36c869-cc19-4183-87e3-2d1cd682ee2d	노화도 씨사이드 리조트	바다가 한눈에 보이는 오션뷰 객실을 갖춘 프리미엄 리조트입니다. 프라이빗 비치와 인피니티 풀을 즐기실 수 있습니다.	완도	전라남도 완도군 노화읍 노화로 856	34.4144	126.7133	450000	4	4.7	12	b8aa4e5a-c52e-4f83-a91f-3fae8803b041	2026-05-04 11:19:37.985114
+779924a4-9fdf-45f6-97d9-7ac8fa69532b	노화 블루베이 리조트	남해의 아름다운 풍경이 펼쳐지는 럭셔리 리조트입니다. 전 객실 욕조 완비와 레스토랑에서 신선한 해산물을 맛보실 수 있습니다.	완도	전라남도 완도군 노화읍 신리항길 45	34.3458	126.7947	380000	6	4.5	8	cd649c15-1bfb-4d2d-83c0-b822f67996f2	2026-05-04 11:19:49.596787
+3435409c-54c1-4823-ae45-b7f6b2b4ffd6	바다풍경펜션	탁 트인 신지명 바다를 조망할 수 있는 아늑한 펜션입니다. 깔끔한 인테리어와 친절한 서비스로 편안한 휴식을 제공합니다.	완도	전라남도 완도군 신지면 신지로 1234	34.3282	126.7147	150000	4	4.5	12	5e2c054f-dcf4-4afe-9796-53471ab67bca	2026-05-04 11:20:05.011178
+950a1f8c-6d74-4b32-a4e3-f3c6a4973d6f	노을마루펜션	신지대교가 보이는 언덕 위에 자리잡은 프리미엄 펜션입니다. 아름다운 석양과 함께 프라이빗한 휴식을 즐길 수 있습니다.	완도	전라남도 완도군 신지면 신지로 789	34.3923	126.7734	280000	6	4.8	8	10d808b0-abcf-4e48-b517-b7d59e2a00b3	2026-05-04 11:20:16.832388
+86eb76c6-edb7-49b1-8c55-ac6236b66957	솔데스크 강남파빌리온점	강남 중심부에 위치한 프리미엄 코워킹 스테이. 세련된 인테리어와 최신 시설을 갖춘 비즈니스 특화 숙소로, 강남역과 도보 5분 거리에 있어 접근성이 탁월합니다.	서울	서울특별시 강남구 강남대로98길 16 2층	37.4981	127.028	100000	4	4.8	324	\N	2026-05-06 01:22:22.882176
+d83e5082-a03d-4e1c-918a-37d17b0d8995	솔데스크 강남성옥빌딩점	봉은사로 인근 프리미엄 스테이. 5층과 6층 전체를 사용하는 넓은 공간으로, 삼성역과 코엑스 인근에 위치해 비즈니스 및 레저 모두 최적의 위치입니다.	서울	서울특별시 강남구 봉은사로 119 5층, 6층	37.5131	127.0572	100000	4	4.7	218	\N	2026-05-06 01:22:22.882176
+dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	솔데스크 종로점	종로 코아빌딩 2층, 5층, 8층, 9층, 10층에 위치한 대형 코워킹 스테이. 경복궁과 인사동 인근의 역사적인 환경 속에서 현대적인 편의시설을 제공합니다.	서울	서울특별시 종로구 종로12길 15 코아빌딩	37.5704	126.9831	100000	4	4.9	412	\N	2026-05-06 01:22:22.882176
+\.
+
+-- ── rooms ──
+COPY rooms (id, stay_id, name, max_guests, price_per_night, room_count, remaining_count) FROM stdin;
+b5262852-2648-4d2f-b370-460628df658d	9cb96a8c-68f4-4f87-ba50-34b23e1249aa	스탠다드룸	4	280000	1	1
+b749044c-4cb5-4eed-a65d-1bc469d9f477	9cb96a8c-68f4-4f87-ba50-34b23e1249aa	디럭스룸	4	310000	1	1
+b8f705ed-b70a-4162-ba70-366a7708c6c0	9cb96a8c-68f4-4f87-ba50-34b23e1249aa	스위트룸	4	340000	1	1
+ba70a53d-1491-43e3-b516-be267903136a	a92817ec-6965-47ef-bf9d-9809d9fa42ae	스탠다드룸	2	65000	1	1
+749c6191-84db-4a58-9cac-ce6730e8651b	a92817ec-6965-47ef-bf9d-9809d9fa42ae	디럭스룸	2	95000	1	1
+2bbf1961-bb1d-4b9f-8494-851d2a71b3bc	1a568fb4-84d5-4b61-a5c7-144321eda70b	스탠다드룸	6	950000	1	1
+9ce429da-1349-4f66-85f7-f7d65495e476	1a568fb4-84d5-4b61-a5c7-144321eda70b	디럭스룸	6	980000	1	1
+19b6b353-4e69-47a8-bc8a-f24cb462a2f2	1a568fb4-84d5-4b61-a5c7-144321eda70b	스위트룸	6	1010000	1	1
+c43e71a9-3d21-417a-971d-fa85653deb20	b7160a1a-901d-4569-a8f2-f5a9a7ab623e	스탠다드룸	3	320000	1	1
+ab011ce1-58ec-4166-b7ca-a2ecbd91fc3f	b7160a1a-901d-4569-a8f2-f5a9a7ab623e	디럭스룸	3	350000	1	1
+9b9cd2cf-3bcf-4ad5-8ced-3f0b3d235eee	1ac108fc-359e-4045-aa3e-94066fd9d2d9	스탠다드룸	5	450000	1	1
+8b915054-da37-4fc3-a744-23b11d9c08b3	1ac108fc-359e-4045-aa3e-94066fd9d2d9	디럭스룸	5	480000	1	1
+7af1f546-981f-4b01-9fae-a476936ac083	1ef0c576-a2c5-4ba8-a151-85dfe865487f	스탠다드룸	2	55000	1	1
+4877ef7b-80eb-48f7-b4e1-d17a08841377	1ef0c576-a2c5-4ba8-a151-85dfe865487f	디럭스룸	2	85000	1	1
+7ff207f7-2fd6-4839-84a9-af0c9f0f0e6b	9f1b56e8-fff8-42d5-b421-1b3045236300	스탠다드룸	8	980000	1	1
+a0ac2d97-4ad3-4cd5-baa5-7ad1c48d1f26	9f1b56e8-fff8-42d5-b421-1b3045236300	디럭스룸	8	1010000	1	1
+52f1d1ce-d862-4aea-9d1a-7a872f31d148	9f1b56e8-fff8-42d5-b421-1b3045236300	스위트룸	8	1040000	1	1
+70b2067a-82f5-4280-b1eb-95f03dd62860	a7fbefbc-c1d1-41a1-ada7-acec62048f2f	스탠다드룸	4	420000	1	1
+88b6160b-ae2c-4c9f-9393-2223aa6769cf	a7fbefbc-c1d1-41a1-ada7-acec62048f2f	디럭스룸	4	450000	1	1
+bda0231e-9a76-4386-a09a-feb292937ad2	e497fb6f-c7bb-4e34-b943-421b29ecc4f9	스탠다드룸	2	70000	1	1
+be946e04-63de-4bc7-a585-61d69c0345ed	e497fb6f-c7bb-4e34-b943-421b29ecc4f9	디럭스룸	2	100000	1	1
+b0244ec1-e200-4c4e-8ccd-8616e45ff3a3	e497fb6f-c7bb-4e34-b943-421b29ecc4f9	스위트룸	2	130000	1	1
+16485ce4-0809-4019-9ccc-ab6cdad2f214	e9f9ec13-9207-4cfa-8255-3a2668fadae9	스탠다드룸	6	580000	1	1
+e8113995-91e2-4c3e-b845-16f5ae414c83	e9f9ec13-9207-4cfa-8255-3a2668fadae9	디럭스룸	6	610000	1	1
+c955f2d3-6fff-4f50-be71-8d9ee3cb9eeb	e9f9ec13-9207-4cfa-8255-3a2668fadae9	스위트룸	6	640000	1	1
+a777779d-4ac4-451a-bcca-e0d41ee1e432	f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	스탠다드룸	4	280000	1	1
+affab463-1dd7-4c50-a4fc-529ef8506926	f35bd3a8-4d33-4d5d-b74e-4f832fdd36de	디럭스룸	4	310000	1	1
+890b1a98-d73d-4380-afc1-fe74587ee5f4	8d6d5122-6bcb-40d4-8a58-b43cdb967885	스탠다드룸	6	450000	1	1
+c8340b65-0ab0-4e8b-b041-4d2403c1e1cf	8d6d5122-6bcb-40d4-8a58-b43cdb967885	디럭스룸	6	480000	1	1
+dc987687-2d29-419e-bba4-522665c83836	8d6d5122-6bcb-40d4-8a58-b43cdb967885	스위트룸	6	510000	1	1
+b5587a6d-fa50-4aaf-9d88-72860154604f	242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	스탠다드룸	2	65000	1	1
+943fcfca-3463-41b9-8627-8c13d714916e	242d1a72-183c-4c29-b2d0-9a81d1a0dfbd	디럭스룸	2	95000	1	1
+b1fa05fb-f956-4ed8-ab21-13562ca67267	0d16c734-b953-4830-9fbb-0f2ba421f6b8	스탠다드룸	2	65000	1	1
+87e243d0-6fac-40c0-b34c-d4297cc4a730	0d16c734-b953-4830-9fbb-0f2ba421f6b8	디럭스룸	2	95000	1	1
+5bacca19-781f-4cbf-92c9-22e4caccf672	fafc92a2-31f7-472a-8eb5-5a16012d9005	스탠다드룸	3	75000	1	1
+6fd03c0c-431f-4ab1-bc5b-f367fa754836	fafc92a2-31f7-472a-8eb5-5a16012d9005	디럭스룸	3	105000	1	1
+4cbcabcc-b0f5-4330-8a3d-f5c3be93709b	b383ceef-b5c7-49b3-80d9-d287ec062c0a	스탠다드룸	2	85000	1	1
+57b863b8-1534-433d-80c0-5c6fb6a2aed8	b383ceef-b5c7-49b3-80d9-d287ec062c0a	디럭스룸	2	115000	1	1
+fbd23c6a-dd8e-4d10-8df3-b1517f39f8c0	236c38f8-a7de-428b-9b73-63bd854975ac	스탠다드룸	4	95000	1	1
+fd20b517-66f3-427b-8a79-31a81ea3effa	236c38f8-a7de-428b-9b73-63bd854975ac	디럭스룸	4	125000	1	1
+cac45e27-06e9-4e86-9b8c-b00f50adf965	236c38f8-a7de-428b-9b73-63bd854975ac	스위트룸	4	155000	1	1
+3530dc60-acb2-4145-a184-909ebfa61784	359fa56a-bf69-44ed-9586-0a18a6f6f9fe	스탠다드룸	2	55000	1	1
+292610fb-fdbe-4d49-8125-e9ee07c8d4bf	359fa56a-bf69-44ed-9586-0a18a6f6f9fe	디럭스룸	2	85000	1	1
+3f6c541b-a01d-4096-b0aa-25af92e2f478	359fa56a-bf69-44ed-9586-0a18a6f6f9fe	스위트룸	2	115000	1	1
+be7cade4-d107-4c27-a2c7-02941b049952	beb5fb68-68d3-43f3-8aac-6d445a82e1a8	스탠다드룸	3	120000	1	1
+2a92faab-1b50-4582-beaa-931a37b28edd	beb5fb68-68d3-43f3-8aac-6d445a82e1a8	디럭스룸	3	150000	1	1
+ada44edf-0ea3-4e72-9961-430b28dc428a	beb5fb68-68d3-43f3-8aac-6d445a82e1a8	스위트룸	3	180000	1	1
+fa4033fe-4655-48f3-9aa0-dd65179ea228	cd28e925-c07d-4115-9230-1f2e991b665e	스탠다드룸	2	60000	1	1
+6e7afc19-c8e4-4408-9e9b-06e7f3489646	cd28e925-c07d-4115-9230-1f2e991b665e	디럭스룸	2	90000	1	1
+e831c055-effc-47f2-ad08-f80bcb83240d	cd28e925-c07d-4115-9230-1f2e991b665e	스위트룸	2	120000	1	1
+ced17301-1e3f-412d-a5af-6cf465f5ccec	1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	스탠다드룸	2	70000	1	1
+45084873-960b-49bf-aa2b-e648e29b6378	1e9ad5a9-4c1e-40a9-a92a-dd09ffbaa59b	디럭스룸	2	100000	1	1
+300c6b3b-1dd3-4b0e-861d-9c603f8b052e	94f5f0a9-115e-4c78-be1a-8f92dc2640be	스탠다드룸	4	110000	1	1
+7cc3d61a-803b-4915-b155-f18a760c5688	94f5f0a9-115e-4c78-be1a-8f92dc2640be	디럭스룸	4	140000	1	1
+818c865b-96a4-4780-adc3-41f5027f4307	2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	스탠다드룸	2	58000	1	1
+5082bd02-7a74-4b43-ad28-f790056dc90b	2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	디럭스룸	2	88000	1	1
+1e31e76b-042f-42b6-a591-b7233cf39595	2b5c3b2d-27e3-4f27-9bbc-f6ac9b0279f1	스위트룸	2	118000	1	1
+ce7b39a0-845e-437b-a3f7-56183533ccc1	bf609333-bb05-450d-b9ef-29b0e6b47563	스탠다드룸	2	65000	1	1
+7e7d9b05-7fc2-4fc6-b31f-de1c904c0222	bf609333-bb05-450d-b9ef-29b0e6b47563	디럭스룸	2	95000	1	1
+83142944-4584-42b5-bb8c-197f1a9eed6a	6a493540-58bc-4f9e-83fd-e56254d70913	스탠다드룸	3	75000	1	1
+244d6238-fc30-4c45-a1a8-4994b8c23d02	6a493540-58bc-4f9e-83fd-e56254d70913	디럭스룸	3	105000	1	1
+1524e205-b7ce-4d6f-94b0-e20416e3e728	6a493540-58bc-4f9e-83fd-e56254d70913	스위트룸	3	135000	1	1
+ecd7e603-f733-4c58-b82b-2c7e0a096bd8	dccd1b8d-a5b4-4990-b769-cf664a1e8511	스탠다드룸	4	85000	1	1
+c69024a0-c943-4158-a21b-54017025e6cb	dccd1b8d-a5b4-4990-b769-cf664a1e8511	디럭스룸	4	115000	1	1
+78fb3058-de20-49b5-9d41-6ebf2dc64e3a	dccd1b8d-a5b4-4990-b769-cf664a1e8511	스위트룸	4	145000	1	1
+01d27db3-9daf-40af-85be-4cce6b170b6c	40d604e2-f942-4507-bcb5-1683ae90353c	스탠다드룸	6	850000	1	1
+428c1443-daae-484e-8423-93b1f15390bc	40d604e2-f942-4507-bcb5-1683ae90353c	디럭스룸	6	880000	1	1
+4b0286b9-5feb-48cd-ab70-eef0a1f81a04	d638547b-4035-4287-acd0-86ca7c24a68b	스탠다드룸	4	450000	1	1
+e50108ed-2ea2-4444-a815-2286a07a73f1	d638547b-4035-4287-acd0-86ca7c24a68b	디럭스룸	4	480000	1	1
+fd3ba764-8eb5-4f7e-b3bb-bdfe68d4ffd1	9ba5de3d-fad4-4ce8-839b-bbdb3670626b	스탠다드룸	5	580000	1	1
+65afda76-48cc-49a7-992d-ef4547d66286	9ba5de3d-fad4-4ce8-839b-bbdb3670626b	디럭스룸	5	610000	1	1
+c36165ba-79c4-42d7-9745-07935a00fea3	9ba5de3d-fad4-4ce8-839b-bbdb3670626b	스위트룸	5	640000	1	1
+6bf151f8-280e-4b3f-a64a-8d7f21505a36	a525650c-75f9-4334-a196-cd0958a8b9d1	스탠다드룸	4	680000	1	1
+40906481-7c73-4548-a20f-8df6798ebbb2	a525650c-75f9-4334-a196-cd0958a8b9d1	디럭스룸	4	710000	1	1
+d214ee12-32fd-4713-9e89-3d6bb95f940c	a525650c-75f9-4334-a196-cd0958a8b9d1	스위트룸	4	740000	1	1
+e762a5e1-3440-45bc-8edb-3e94643a98cd	485e38aa-abdc-45e4-9464-f7d285d4691f	스탠다드룸	8	920000	1	1
+9f815e1b-d9b7-448d-aca7-89d74ae876e0	485e38aa-abdc-45e4-9464-f7d285d4691f	디럭스룸	8	950000	1	1
+f174927f-f502-440f-9b76-2143facabdf7	e3d4c901-3e76-443d-91ec-d773b6ec2ce0	스탠다드룸	4	420000	1	1
+ed1a1563-f94e-4bda-8838-a90484997f8f	e3d4c901-3e76-443d-91ec-d773b6ec2ce0	디럭스룸	4	450000	1	1
+8f926b44-9607-4cd3-bede-bc06605f69de	4b9de8d3-ffed-41c1-87a8-290aaf859845	스탠다드룸	3	380000	1	1
+b00d7ab2-7dff-40f1-83af-2ef56e382a10	4b9de8d3-ffed-41c1-87a8-290aaf859845	디럭스룸	3	410000	1	1
+a2c5dc49-5545-411b-8dda-a11d26d737ee	4b9de8d3-ffed-41c1-87a8-290aaf859845	스위트룸	3	440000	1	1
+27acf42b-4964-445b-bec8-29f117228698	64c39003-d9dd-4d23-ba12-3ef937497e60	스탠다드룸	2	290000	1	1
+ff18ef6b-1d1a-4764-9b74-f5e8c0c3e96a	64c39003-d9dd-4d23-ba12-3ef937497e60	디럭스룸	2	320000	1	1
+ee783eb2-ef8c-49e9-aebb-d86af8d858c2	64c39003-d9dd-4d23-ba12-3ef937497e60	스위트룸	2	350000	1	1
+d3c628de-cc70-46f9-a8f4-d16e77d675c5	7a663c92-4bd6-4138-b863-90cee940de7e	스탠다드룸	3	350000	1	1
+bad8762c-02d8-4d69-9b0c-37960bb658f6	7a663c92-4bd6-4138-b863-90cee940de7e	디럭스룸	3	380000	1	1
+26df5617-9192-4cc8-a373-b0a4076a983b	7a663c92-4bd6-4138-b863-90cee940de7e	스위트룸	3	410000	1	1
+d649ceb6-d28c-44a3-a883-2e2a66a50b6a	1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	스탠다드룸	5	480000	1	1
+de2b5552-dbd3-470a-9ccf-5df8167bc943	1f79fc7d-2c26-4e44-a03b-bde35d34ad6c	디럭스룸	5	510000	1	1
+2bb3e0db-6194-4d5c-923c-5e9eb43d9f57	8dc56426-8493-40a6-9e50-c2fda0296ef3	스탠다드룸	6	780000	1	1
+9bcbdc4a-52b7-405a-946a-c077534ca6c9	8dc56426-8493-40a6-9e50-c2fda0296ef3	디럭스룸	6	810000	1	1
+6b4cfac0-f2a5-4334-a7d1-48b7b6b0942a	8dc56426-8493-40a6-9e50-c2fda0296ef3	스위트룸	6	840000	1	1
+66942c87-3c7b-4953-abd8-14b895fce52c	838627b1-e061-49c8-a8d9-74ec0a2ce772	스탠다드룸	4	650000	1	1
+2c72480c-d475-4a93-9c4f-82c6d2e7f3fd	838627b1-e061-49c8-a8d9-74ec0a2ce772	디럭스룸	4	680000	1	1
+73decaf8-ecce-40ec-84bc-383f110e98ea	838627b1-e061-49c8-a8d9-74ec0a2ce772	스위트룸	4	710000	1	1
+531bfeb3-d1f3-4e1e-b7c4-a6344b1310bd	08267f37-48f2-4e17-802c-357a7f61b2c0	스탠다드룸	4	280000	1	1
+9fb56046-d2c3-4a0c-868e-834c83908008	08267f37-48f2-4e17-802c-357a7f61b2c0	디럭스룸	4	310000	1	1
+7392f82b-f30d-4adb-a8ec-d025e3d8ee95	4d6787bb-1050-4a47-af6d-3566b573738e	스탠다드룸	3	180000	1	1
+1a8fccb0-cd5d-4de4-a283-78aedde05cf6	4d6787bb-1050-4a47-af6d-3566b573738e	디럭스룸	3	210000	1	1
+c9dfc19d-e010-4fbe-a855-74f4a1ab6f88	877acd7d-a592-4d68-83f1-2cf2269769ff	스탠다드룸	6	450000	1	1
+847e4059-261a-4ff6-ac35-825518af49b5	877acd7d-a592-4d68-83f1-2cf2269769ff	디럭스룸	6	480000	1	1
+747fdc47-1052-4473-8980-54726c7d466d	2bec3081-d55e-469a-bbc3-e2d10a391fbc	스탠다드룸	4	150000	1	1
+42ff8578-dc0a-479d-bd6c-97dbab1d5fe2	2bec3081-d55e-469a-bbc3-e2d10a391fbc	디럭스룸	4	180000	1	1
+33bbe693-7df8-4c75-95d8-cd25a9237538	172296b2-7a08-46cc-9b87-125a6550a354	스탠다드룸	3	220000	1	1
+a8a76705-b275-4a97-b4e6-279a743358d3	172296b2-7a08-46cc-9b87-125a6550a354	디럭스룸	3	250000	1	1
+cd79b221-3318-4f9d-a729-308664f40f1e	dca236b4-2560-4a97-9458-dedf938a19e9	스탠다드룸	5	330000	1	1
+22c4ffa4-8301-44de-b4f2-6d14ef6fda21	dca236b4-2560-4a97-9458-dedf938a19e9	디럭스룸	5	360000	1	1
+fa9d89f9-c7e4-45c0-bffc-7dd742f9e4ca	dca236b4-2560-4a97-9458-dedf938a19e9	스위트룸	5	390000	1	1
+a772f0c2-244b-46bf-a174-f66a704bbed9	31ae2e45-e459-4a72-913e-2d830af1a285	스탠다드룸	4	420000	1	1
+a7881470-738d-49d4-86ff-f7c46b53ddc2	31ae2e45-e459-4a72-913e-2d830af1a285	디럭스룸	4	450000	1	1
+67d104d7-c6d5-4214-a677-1effa2e6cede	31ae2e45-e459-4a72-913e-2d830af1a285	스위트룸	4	480000	1	1
+689135e3-5b65-44e4-bc3d-75fec6dcdbe6	75bd83aa-441d-4cda-b3ed-8cf88df1d083	스탠다드룸	5	290000	1	1
+9f78751b-1387-4844-b490-53c9777e684d	75bd83aa-441d-4cda-b3ed-8cf88df1d083	디럭스룸	5	320000	1	1
+fe206ba9-f7c6-4b82-bd55-e840248743d7	5acc789e-a073-44af-886f-24286cf8bdd8	스탠다드룸	4	250000	1	1
+92b2a94e-029a-463d-bb85-b2c7929ed13c	5acc789e-a073-44af-886f-24286cf8bdd8	디럭스룸	4	280000	1	1
+87139300-1941-4fdc-a3d6-7b65752036ab	d3ec2f62-a89d-4456-b4fc-7afd3537fd74	스탠다드룸	6	580000	1	1
+39339146-85d6-4c62-81ab-96d4ce0fa41b	d3ec2f62-a89d-4456-b4fc-7afd3537fd74	디럭스룸	6	610000	1	1
+a8595643-ce8e-4300-8b2e-6ea773ba823a	6561bbcf-f3d6-42d6-9f59-b157e9f72429	스탠다드룸	4	280000	1	1
+3cd2b9f0-3a15-412f-b312-e40becccd6dc	6561bbcf-f3d6-42d6-9f59-b157e9f72429	디럭스룸	4	310000	1	1
+93bc311e-7bbf-4c93-9e0d-882609ac5195	e0efb689-46f1-4278-9dde-5d8bf00cca7a	스탠다드룸	6	350000	1	1
+2f8b6c38-bda4-4bcb-9622-42d4f477c064	e0efb689-46f1-4278-9dde-5d8bf00cca7a	디럭스룸	6	380000	1	1
+e9d7cf42-de96-4cf8-a5c3-a4d77463bd21	e0efb689-46f1-4278-9dde-5d8bf00cca7a	스위트룸	6	410000	1	1
+9a11021d-ad37-46ab-bd86-ebac10b81cf3	de2a2869-144e-4f0b-86d9-8dbecbe8f959	스탠다드룸	2	85000	1	1
+43eb9467-7491-420a-b2dc-2d161353180b	de2a2869-144e-4f0b-86d9-8dbecbe8f959	디럭스룸	2	115000	1	1
+72500248-86ae-48bf-9f41-667a40b3f36e	1eda098f-9629-4188-bb7d-4daf8a499d0d	스탠다드룸	4	220000	1	1
+1affc52d-35e4-4bfe-9fd6-659ea70d5fdb	1eda098f-9629-4188-bb7d-4daf8a499d0d	디럭스룸	4	250000	1	1
+95887d67-e0eb-4057-9637-01fd200dc26f	da563177-89d1-4f9e-b84f-eb6eb98a7f5a	스탠다드룸	3	165000	1	1
+976d085f-9aba-44df-b2be-0f5bacd5af79	da563177-89d1-4f9e-b84f-eb6eb98a7f5a	디럭스룸	3	195000	1	1
+5a72ada6-4015-4588-8fdd-b98de2e39af7	da563177-89d1-4f9e-b84f-eb6eb98a7f5a	스위트룸	3	225000	1	1
+81cac361-4cad-439f-8098-596d01e20434	58fbe229-3cc7-413c-830b-ab59a5ab35cc	스탠다드룸	6	450000	1	1
+8bc812bb-3689-4572-9a30-da0998ee4fee	58fbe229-3cc7-413c-830b-ab59a5ab35cc	디럭스룸	6	480000	1	1
+bab2bdd8-af40-4495-b9b0-fb455a23558b	d0293ee4-aae2-4b1b-8731-1e87629287af	스탠다드룸	2	55000	1	1
+79adedf2-9481-471f-83dc-1bfd98815c9d	d0293ee4-aae2-4b1b-8731-1e87629287af	디럭스룸	2	85000	1	1
+d9710fe4-e3e0-41a3-806b-b6e6fb83e829	67be5272-f258-472c-9492-0f2fbe115c77	스탠다드룸	8	780000	1	1
+aa32bad0-e986-4fd2-82c6-acd4c5fedd56	67be5272-f258-472c-9492-0f2fbe115c77	디럭스룸	8	810000	1	1
+553c506b-9373-4af6-afee-bfc48da15c62	25b88400-d2d6-4544-8686-066ebe36a5d0	스탠다드룸	2	65000	1	1
+1411753f-29cd-498e-8b3b-c82f498b9a26	25b88400-d2d6-4544-8686-066ebe36a5d0	디럭스룸	2	95000	1	1
+013dd566-89aa-4e8b-8102-04f3f0d6f799	86971d45-d08c-45d0-ad58-6995572b7b4a	스탠다드룸	4	290000	1	1
+f86420df-7c50-4ba2-b61c-040efb2ebe97	86971d45-d08c-45d0-ad58-6995572b7b4a	디럭스룸	4	320000	1	1
+c8d5f81d-9f0a-463a-9eb9-dc5e3c6d2c5c	bdf399bf-a2c8-4d52-93b7-d9936179767f	스탠다드룸	2	65000	1	1
+00daa1c4-a370-4607-98b1-590b5325c263	bdf399bf-a2c8-4d52-93b7-d9936179767f	디럭스룸	2	95000	1	1
+49b649f1-e524-49ae-b6cc-b468c2f5fbc4	bdf399bf-a2c8-4d52-93b7-d9936179767f	스위트룸	2	125000	1	1
+7a27a1ce-41cf-47cc-8aed-64c033413d44	ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	스탠다드룸	3	85000	1	1
+d00685e2-7d90-4e50-acfb-c8d130bb0ac3	ba7c5f4a-94bc-46fc-a7c9-f06d54d79344	디럭스룸	3	115000	1	1
+fdf09a4e-29ca-43ce-96a4-699d28067b16	eda678a8-ecbe-4a7d-a517-84ce4649ac3e	스탠다드룸	2	55000	1	1
+462cf270-bccb-4683-9792-449c0603e1ee	eda678a8-ecbe-4a7d-a517-84ce4649ac3e	디럭스룸	2	85000	1	1
+95465047-86a5-4b00-8525-71461075b2e3	0ef7020c-f18d-4f65-b427-8e629460d11f	스탠다드룸	4	95000	1	1
+7ece259f-a9c8-4a80-868d-705a24c2e48a	0ef7020c-f18d-4f65-b427-8e629460d11f	디럭스룸	4	125000	1	1
+21f81070-b036-48cc-bbb1-d9326a4ceceb	7c2f7e71-bc94-44d5-955c-cc6cb9cea057	스탠다드룸	3	75000	1	1
+2ca17a95-de3e-4216-ad50-1fec8642a6d7	7c2f7e71-bc94-44d5-955c-cc6cb9cea057	디럭스룸	3	105000	1	1
+49d04aa9-f195-4828-a569-1ed9a583b977	7c2f7e71-bc94-44d5-955c-cc6cb9cea057	스위트룸	3	135000	1	1
+ce0ef513-3701-4a76-8c3b-0622586d6277	f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	스탠다드룸	4	88000	1	1
+31256828-a663-41d6-a463-f1a4fc05bf90	f2d40eb1-4a0f-4c22-9e50-330aa7c3b843	디럭스룸	4	118000	1	1
+14db256e-9783-4d24-9ebb-55839632e065	77f4a3cf-4e0d-4091-b680-544461ded840	스탠다드룸	2	79000	1	1
+71a1fced-12c0-4d4e-83cb-52d15815f7e4	77f4a3cf-4e0d-4091-b680-544461ded840	디럭스룸	2	109000	1	1
+666df4c0-196d-433a-b6b8-7dcc5097b7ed	77f4a3cf-4e0d-4091-b680-544461ded840	스위트룸	2	139000	1	1
+d8258279-74ff-461a-a340-29d90b3d6d2f	6202da5e-fb9e-4176-91f6-d27f472a315c	스탠다드룸	3	68000	1	1
+b96edc8c-54d8-41e7-b449-745ed4446196	6202da5e-fb9e-4176-91f6-d27f472a315c	디럭스룸	3	98000	1	1
+f67e0c70-b8db-40be-960f-38f571819a4f	3a8b8aa2-095a-4b85-81b0-16f329f41a4c	스탠다드룸	6	850000	1	1
+5f148b7a-8b89-4c33-8811-01713149b61e	3a8b8aa2-095a-4b85-81b0-16f329f41a4c	디럭스룸	6	880000	1	1
+d8e3d318-75fd-4891-8fda-7a585c315430	3a8b8aa2-095a-4b85-81b0-16f329f41a4c	스위트룸	6	910000	1	1
+87cb16a9-31f3-4b5b-af8e-377c0a655823	aaee4c46-75b7-4be6-af77-4f14533157cb	스탠다드룸	4	180000	1	1
+acfcb33c-1255-4db3-b2fe-7f776d1c205f	aaee4c46-75b7-4be6-af77-4f14533157cb	디럭스룸	4	210000	1	1
+0ea69518-2ab6-4f0f-9f4c-cdd6bb94f12f	aaee4c46-75b7-4be6-af77-4f14533157cb	스위트룸	4	240000	1	1
+c3508262-6bc4-4b42-914b-895b27ce69ff	360ad8b5-3cf7-446b-974e-457f60b44d84	스탠다드룸	4	950000	1	1
+26ba4eb9-a2fb-4d27-8eca-d1c30ea17c49	360ad8b5-3cf7-446b-974e-457f60b44d84	디럭스룸	4	980000	1	1
+35feec6d-3ad4-4d1b-bdbf-b48441e8606c	c79d1ae4-b6d6-4f36-a03e-78a31da1937d	스탠다드룸	2	65000	1	1
+4471ee15-2f56-460c-9f21-2c213b45a384	c79d1ae4-b6d6-4f36-a03e-78a31da1937d	디럭스룸	2	95000	1	1
+806aa3c2-8faf-4697-97a9-8282dc7c1de8	c79d1ae4-b6d6-4f36-a03e-78a31da1937d	스위트룸	2	125000	1	1
+7b408860-84e4-42a7-b5af-7785df7f6173	a0765775-a111-47e5-99ce-723f5d4d3e37	스탠다드룸	8	780000	1	1
+61d7bbf2-1cd0-40d2-8378-52acc9f497b6	a0765775-a111-47e5-99ce-723f5d4d3e37	디럭스룸	8	810000	1	1
+87f42fb0-c34f-4e33-a5f8-c25e55c61f77	a0765775-a111-47e5-99ce-723f5d4d3e37	스위트룸	8	840000	1	1
+754a4490-cf62-421c-92e4-aa2ae70810c8	dc165584-65c4-481c-9ee9-78eeef588b91	스탠다드룸	2	55000	1	1
+cf0d5c4a-633a-4df8-b632-06396fb4bc74	dc165584-65c4-481c-9ee9-78eeef588b91	디럭스룸	2	85000	1	1
+07ff0917-d2dd-4134-b8e6-f552234b1c61	5688bfdd-2dab-4710-b028-c366fd11eb29	스탠다드룸	6	450000	1	1
+d3a9da23-244e-480e-9ed8-9f02fcc36d4f	5688bfdd-2dab-4710-b028-c366fd11eb29	디럭스룸	6	480000	1	1
+301cf242-eaaa-4492-93b8-9c19fd9fa658	e9f95823-4968-400d-9b80-93beba7f3496	스탠다드룸	4	120000	1	1
+fa006bb2-7e5f-47e7-8630-8a68abe5a44a	e9f95823-4968-400d-9b80-93beba7f3496	디럭스룸	4	150000	1	1
+995b13cb-e0d9-4d0d-b1bb-c84aed905ac0	e9f95823-4968-400d-9b80-93beba7f3496	스위트룸	4	180000	1	1
+13ec716c-2630-426d-8af5-c27cb28e8f78	be04ab0c-a9b1-499b-a7a5-39666f4c263e	스탠다드룸	3	180000	1	1
+30c7a3ff-9523-4b86-9531-3d984973bf7d	be04ab0c-a9b1-499b-a7a5-39666f4c263e	디럭스룸	3	210000	1	1
+eda32df2-14a8-45bb-94eb-79ab94fd0cb9	d4fc2ff7-c765-434a-b087-d05e3e8be6a1	스탠다드룸	6	450000	1	1
+9454e006-df9c-479f-8a5d-0be97139bed9	d4fc2ff7-c765-434a-b087-d05e3e8be6a1	디럭스룸	6	480000	1	1
+ee2eeb31-4c72-4bbf-93aa-8a5c9d3db7b2	d4fc2ff7-c765-434a-b087-d05e3e8be6a1	스위트룸	6	510000	1	1
+17ac9921-1014-47e1-a9c2-1aa9d4caceca	0a922ede-1c2a-43b5-a5db-b8b8031c80d5	스탠다드룸	5	150000	1	1
+795f4d7f-464b-4df3-872a-db015c256c94	0a922ede-1c2a-43b5-a5db-b8b8031c80d5	디럭스룸	5	180000	1	1
+e34c874d-36fe-425f-909f-c582f8d2cd63	168d8ac6-b53c-49f7-a118-f75cbd32f357	스탠다드룸	8	680000	1	1
+9f3d415f-d7c4-4006-9bb8-f6bfbd27a7ff	168d8ac6-b53c-49f7-a118-f75cbd32f357	디럭스룸	8	710000	1	1
+f1bbb702-edc8-4a95-bad6-26ab53e7ac53	168d8ac6-b53c-49f7-a118-f75cbd32f357	스위트룸	8	740000	1	1
+d89dd855-c7a4-4785-833d-c92a43678c5b	aab2b4ca-3f30-457e-b758-e81a1b659586	스탠다드룸	2	95000	1	1
+90a22161-2410-4037-bd50-5ee99cc03871	aab2b4ca-3f30-457e-b758-e81a1b659586	디럭스룸	2	125000	1	1
+4d16a777-c352-4d2f-98dd-cc3933d3e692	b9fac2b3-84e5-49aa-b868-b560edc50285	스탠다드룸	4	250000	1	1
+b645d8cf-1021-4071-9cc3-7ae8a7e3bad5	b9fac2b3-84e5-49aa-b868-b560edc50285	디럭스룸	4	280000	1	1
+1a4d5ac4-0bd0-43d9-a4dd-c0c7ada61bbf	0af916c8-e7a8-470a-8187-2fbf29b2fffc	스탠다드룸	4	280000	1	1
+14127aa4-fdec-48ae-a359-4a8bb8737e05	0af916c8-e7a8-470a-8187-2fbf29b2fffc	디럭스룸	4	310000	1	1
+c8e73b14-9376-4c0f-be9e-d9386fe2fe3a	881a5faa-67d5-4f23-8551-8488bee96d28	스탠다드룸	6	450000	1	1
+3bf5fec3-2191-499b-901b-0d2b2a786439	881a5faa-67d5-4f23-8551-8488bee96d28	디럭스룸	6	480000	1	1
+0d89945b-1f6d-4f08-a2cd-b6ad8cf1ad92	881a5faa-67d5-4f23-8551-8488bee96d28	스위트룸	6	510000	1	1
+471ee01f-1ed8-4d8c-a4bc-36c498b2d346	8689265e-80b2-43f0-a206-3d2ab45344c0	스탠다드룸	2	85000	1	1
+8a74d6b1-3590-4a01-b1aa-5efe46357012	8689265e-80b2-43f0-a206-3d2ab45344c0	디럭스룸	2	115000	1	1
+aef285f3-5576-4f63-87dc-9bd7007364c2	3c30c794-aa08-495f-a1fd-3e8969786720	스탠다드룸	8	880000	1	1
+1e3cac11-e687-457b-8fd8-7a8e774c6f01	3c30c794-aa08-495f-a1fd-3e8969786720	디럭스룸	8	910000	1	1
+45719f4e-bc0b-4858-9331-e728c4062cd4	3c30c794-aa08-495f-a1fd-3e8969786720	스위트룸	8	940000	1	1
+2aa712fe-7833-4872-b707-5e66e6b5d93f	df270160-7bbc-4841-9bff-d908ede11f1c	스탠다드룸	4	180000	1	1
+a6bc5346-dede-4953-8554-416bc5288d7a	df270160-7bbc-4841-9bff-d908ede11f1c	디럭스룸	4	210000	1	1
+2019e641-dd2f-47ee-b775-e39fde983a15	e5a15f48-b33a-48ee-a722-881fe2eb6a44	스탠다드룸	2	65000	1	1
+d2441942-0bac-4bc8-b09f-c327bd6c09d3	e5a15f48-b33a-48ee-a722-881fe2eb6a44	디럭스룸	2	95000	1	1
+8247a0d4-a532-4c6e-956d-c344da08e853	e5a15f48-b33a-48ee-a722-881fe2eb6a44	스위트룸	2	125000	1	1
+0a704f41-9186-4122-901d-171aa51b91a6	08cc31b6-7fd7-4d03-8772-fce84cf69fc2	스탠다드룸	3	85000	1	1
+7301244f-9c6c-4e26-a9dc-a97c9ca932f5	08cc31b6-7fd7-4d03-8772-fce84cf69fc2	디럭스룸	3	115000	1	1
+1dda08c6-97c7-49dd-b62a-e4aa738be9ff	08cc31b6-7fd7-4d03-8772-fce84cf69fc2	스위트룸	3	145000	1	1
+d6b2e71a-831c-4dfc-a73f-84ed626b7d78	52f8be12-ab6d-4964-91a9-d7ab053c98a0	스탠다드룸	2	55000	1	1
+53e99328-e378-4a64-92c0-dfd3a3f26bef	52f8be12-ab6d-4964-91a9-d7ab053c98a0	디럭스룸	2	85000	1	1
+43a63993-3a55-4355-9dda-c1a1fc2b3746	52f8be12-ab6d-4964-91a9-d7ab053c98a0	스위트룸	2	115000	1	1
+e091194a-13a4-434b-883a-d6621d9b6967	2180a99f-675a-486e-84c4-a9d300196aaa	스탠다드룸	4	95000	1	1
+d13de5bb-60b9-42b6-a256-4b801b8d7531	2180a99f-675a-486e-84c4-a9d300196aaa	디럭스룸	4	125000	1	1
+d2958938-e585-47b1-b93b-a8b26d748cd8	5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	스탠다드룸	3	75000	1	1
+b557f028-3686-4e3c-bed3-d039c0191e60	5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	디럭스룸	3	105000	1	1
+a26e9af6-d16f-4bfb-a62b-935e6185eeaa	5ca8d28d-389f-4af6-809a-e2fcbfc34b6f	스위트룸	3	135000	1	1
+95890686-39f2-41f5-a6b8-048d94ce2c81	d23078db-dbd7-454e-a881-9d43d4a79338	스탠다드룸	4	850000	1	1
+25b20a44-4077-4e84-bc04-a0166eebaa79	d23078db-dbd7-454e-a881-9d43d4a79338	디럭스룸	4	880000	1	1
+9d3c29c4-4d68-4344-9758-fa6a1bed0dae	8feeffdc-45ef-4903-b234-007c83e339d4	스탠다드룸	6	680000	1	1
+d45eb5ce-95d5-42dd-b5a5-61e2ee0ddfa8	8feeffdc-45ef-4903-b234-007c83e339d4	디럭스룸	6	710000	1	1
+83ed0be7-11f6-4424-8b7a-d8897207d0d3	8feeffdc-45ef-4903-b234-007c83e339d4	스위트룸	6	740000	1	1
+ffe545be-b29a-4f3d-80b1-c858e3be7f05	c1c52b86-2ef1-4cac-b064-422db103e400	스탠다드룸	8	920000	1	1
+2fa85b32-b005-4380-a648-47a0f4ca2adb	c1c52b86-2ef1-4cac-b064-422db103e400	디럭스룸	8	950000	1	1
+cc270665-0d46-4f15-a730-1f3ba1207fbc	c1c52b86-2ef1-4cac-b064-422db103e400	스위트룸	8	980000	1	1
+4b8710df-841e-40b0-b13c-01ffb1ee999e	d7d55482-6b1a-42af-85e4-8bc3dd3a3582	스탠다드룸	3	450000	1	1
+361fd1f9-2ada-4055-8f0f-6cf4f2758051	d7d55482-6b1a-42af-85e4-8bc3dd3a3582	디럭스룸	3	480000	1	1
+d4a4517c-ea86-4332-a859-fbac094dc69d	d7d55482-6b1a-42af-85e4-8bc3dd3a3582	스위트룸	3	510000	1	1
+3b51267e-b96a-4c42-81d7-a909496c5b39	5c98650c-4713-463d-9f0d-70579dc6acce	스탠다드룸	6	580000	1	1
+d6731979-9786-455d-8328-63c424670a8f	5c98650c-4713-463d-9f0d-70579dc6acce	디럭스룸	6	610000	1	1
+5b1cf544-5d79-4763-a152-68d33ccb6bfe	5c98650c-4713-463d-9f0d-70579dc6acce	스위트룸	6	640000	1	1
+fba963e5-b703-4e62-9c7a-684ac64e0223	1bce9114-d641-4411-9796-875b0dc39816	스탠다드룸	4	280000	1	1
+24b06165-6b5f-4719-8199-5a5cf18005ad	1bce9114-d641-4411-9796-875b0dc39816	디럭스룸	4	310000	1	1
+4207976c-ac09-454d-ad6a-92cfe1c2987b	f1a1647e-d051-4f50-806a-75d6739aa6a2	스탠다드룸	3	150000	1	1
+7dd020f7-1887-4511-948b-ae15495d881a	f1a1647e-d051-4f50-806a-75d6739aa6a2	디럭스룸	3	180000	1	1
+f5ac2e1c-839c-4c9a-a102-0cac9b5f2cd5	8b234c5b-0097-42d9-8c56-5c3327fa4e46	스탠다드룸	6	450000	1	1
+3b8ed9f4-3f42-4288-b41b-cf18780afbac	8b234c5b-0097-42d9-8c56-5c3327fa4e46	디럭스룸	6	480000	1	1
+e08d1e00-c929-4e78-8e71-52f797f91319	8b234c5b-0097-42d9-8c56-5c3327fa4e46	스위트룸	6	510000	1	1
+1096cc57-7421-4cbf-94ec-0051f5319e07	386b2a26-14e4-4bce-822f-0ce5b3e7ad80	스탠다드룸	5	350000	1	1
+7aae636e-d09f-4d85-87fa-47aea889bf68	386b2a26-14e4-4bce-822f-0ce5b3e7ad80	디럭스룸	5	380000	1	1
+bf23d34d-80ab-4836-b9a9-d0d70bcafd67	d7c76c61-a6be-4de2-93cc-3880c170b2f8	스탠다드룸	4	180000	1	1
+838575aa-92d4-47b9-a540-5b2849c1a6fa	d7c76c61-a6be-4de2-93cc-3880c170b2f8	디럭스룸	4	210000	1	1
+8c3566be-8845-4472-ab87-31daa0cd1b95	d7c76c61-a6be-4de2-93cc-3880c170b2f8	스위트룸	4	240000	1	1
+98915d57-1cf3-42b5-870d-56090cf2b3cf	dad3c35c-9f56-48fa-b4ca-edf394d870a1	스탠다드룸	3	85000	1	1
+0dc173b1-e959-4626-bb4a-8da271b64418	dad3c35c-9f56-48fa-b4ca-edf394d870a1	디럭스룸	3	115000	1	1
+1b566f98-f670-4732-9db0-904eafb78aa6	219abcd8-74c6-4610-875f-0fbfdeff29ae	스탠다드룸	2	55000	1	1
+fafb30af-e64d-4f4c-8fdd-315ee701b7cf	219abcd8-74c6-4610-875f-0fbfdeff29ae	디럭스룸	2	85000	1	1
+160d3358-713b-4b2b-a414-29945fc02d02	b4be8b62-a621-454f-9607-83124238f496	스탠다드룸	6	450000	1	1
+d6092363-42ab-4445-a43d-03a6f66fb12c	b4be8b62-a621-454f-9607-83124238f496	디럭스룸	6	480000	1	1
+66231962-e1e6-46a3-8f70-dd411a00a546	b4be8b62-a621-454f-9607-83124238f496	스위트룸	6	510000	1	1
+a10fe3b1-dee1-4403-b031-3bcb3da75759	9510b658-38b5-461f-b657-84781a2e3127	스탠다드룸	2	55000	1	1
+99bb6f4c-91d0-4904-afb7-f954be1b147c	9510b658-38b5-461f-b657-84781a2e3127	디럭스룸	2	85000	1	1
+800255da-797a-4d61-a3f1-f4531a723ad3	9510b658-38b5-461f-b657-84781a2e3127	스위트룸	2	115000	1	1
+bc180bc5-b72b-4569-8375-bc01fad91856	937505b1-971e-4d0f-982b-e3987adb7e80	스탠다드룸	3	75000	1	1
+eb3b7984-de5f-430c-8dc2-2c5c41e8da44	937505b1-971e-4d0f-982b-e3987adb7e80	디럭스룸	3	105000	1	1
+c0ac64a3-cf33-4f36-ad13-7bd8a23f2701	937505b1-971e-4d0f-982b-e3987adb7e80	스위트룸	3	135000	1	1
+f345592d-9905-4a98-856f-b4c43d014ae4	9bfc5a90-20bf-4922-9060-1a065e69ba00	스탠다드룸	2	65000	1	1
+6f74ad08-9259-4212-bc0e-62be1857bd21	9bfc5a90-20bf-4922-9060-1a065e69ba00	디럭스룸	2	95000	1	1
+e8db245c-8a8e-482f-91fe-1f959007a4d0	2cb8ba85-6423-45dc-8a0e-c5854d2499cf	스탠다드룸	6	280000	1	1
+db78ccab-cc92-47bf-8f3f-b67b49f89737	2cb8ba85-6423-45dc-8a0e-c5854d2499cf	디럭스룸	6	310000	1	1
+85c4a12c-a2e1-43ac-b70b-f30bfc7ece58	2cb8ba85-6423-45dc-8a0e-c5854d2499cf	스위트룸	6	340000	1	1
+e221e058-0304-449c-b348-f5ee60a1d69a	0717200b-f3d2-469a-967d-16ece3900c10	스탠다드룸	4	350000	1	1
+b3586462-f543-48c5-b2ec-f27f32fe5e8a	0717200b-f3d2-469a-967d-16ece3900c10	디럭스룸	4	380000	1	1
+59f35ff5-6e2c-4a3a-98f9-3c7432a7bb6c	f1cd504c-2bcc-4607-acac-04cdf23188de	스탠다드룸	6	180000	1	1
+ab772f07-9176-4fd2-98b9-b6a603ec5241	f1cd504c-2bcc-4607-acac-04cdf23188de	디럭스룸	6	210000	1	1
+83c632c8-2d8c-4bb2-b2d6-5dc76dfcc42e	2ad90f0e-f60f-4944-bc96-23c176c4e241	스탠다드룸	4	250000	1	1
+a0c682ab-528d-4368-8445-0844800bc89d	2ad90f0e-f60f-4944-bc96-23c176c4e241	디럭스룸	4	280000	1	1
+7823a306-eba8-4e39-a492-53678d8d9461	2ad90f0e-f60f-4944-bc96-23c176c4e241	스위트룸	4	310000	1	1
+f94b1aab-90cf-41e8-a490-457850726aaf	51aa216e-e168-49d2-a909-14737e69e518	스탠다드룸	4	120000	1	1
+29dd2b58-e030-4263-a709-7df355277065	51aa216e-e168-49d2-a909-14737e69e518	디럭스룸	4	150000	1	1
+049f333a-b5da-4b3a-8268-323b73a846f9	51aa216e-e168-49d2-a909-14737e69e518	스위트룸	4	180000	1	1
+1b72a17c-304e-4f80-aced-a442461436af	eddfcab7-9942-4beb-ae93-ef4235cb1f75	스탠다드룸	6	280000	1	1
+b9ba425a-9759-4ceb-9a4a-9078e0940a8a	eddfcab7-9942-4beb-ae93-ef4235cb1f75	디럭스룸	6	310000	1	1
+cf50eef3-8c6b-45da-8a0c-dec5d6bcb529	eddfcab7-9942-4beb-ae93-ef4235cb1f75	스위트룸	6	340000	1	1
+daf033a9-3a2e-4054-9c71-d2fe7765ef41	039d05f4-b152-47cd-9115-7d50c896fe90	스탠다드룸	2	55000	1	1
+0d8a94b6-a611-4e14-9443-1644cb6580c5	039d05f4-b152-47cd-9115-7d50c896fe90	디럭스룸	2	85000	1	1
+2eb3cbc2-1754-4470-9926-a2d0a1b4a4bd	bf317b54-d0ae-49b3-b6b1-1c9218480ec8	스탠다드룸	2	65000	1	1
+891ee1d7-c1d6-4288-b8a8-f398298daaae	bf317b54-d0ae-49b3-b6b1-1c9218480ec8	디럭스룸	2	95000	1	1
+0eae54cf-8844-4e16-822e-bf9fa1397421	bf317b54-d0ae-49b3-b6b1-1c9218480ec8	스위트룸	2	125000	1	1
+930f000a-a03e-47ff-988c-baeefeec5766	9b3012bc-af0d-4a8b-a1cb-670b641fa525	스탠다드룸	3	55000	1	1
+0814d09b-48a6-4e56-8093-ccdf132b888c	9b3012bc-af0d-4a8b-a1cb-670b641fa525	디럭스룸	3	85000	1	1
+e75d174b-4ce1-42a8-a0f6-e1226adfbb21	9b3012bc-af0d-4a8b-a1cb-670b641fa525	스위트룸	3	115000	1	1
+26b467a5-ebb5-4394-89fd-bcc43ddf5536	f3b0f0a1-179b-4814-b3b0-f138120e03cb	스탠다드룸	2	70000	1	1
+5d362eb8-f1bb-4d6b-80b3-3a87bccbcc6e	f3b0f0a1-179b-4814-b3b0-f138120e03cb	디럭스룸	2	100000	1	1
+244ee048-cbc8-4a0f-8b6f-b849ecef73b3	f3b0f0a1-179b-4814-b3b0-f138120e03cb	스위트룸	2	130000	1	1
+d2cb70ab-707d-47c5-9550-ed2bcaa1f679	fb36c869-cc19-4183-87e3-2d1cd682ee2d	스탠다드룸	4	450000	1	1
+1d73a89e-9dad-4bee-9ed7-0551032087ec	fb36c869-cc19-4183-87e3-2d1cd682ee2d	디럭스룸	4	480000	1	1
+386893fe-b481-4354-875e-b4c0d1f6e94d	779924a4-9fdf-45f6-97d9-7ac8fa69532b	스탠다드룸	6	380000	1	1
+2991b00f-1b18-4760-a083-f2a7ccb8bbe4	779924a4-9fdf-45f6-97d9-7ac8fa69532b	디럭스룸	6	410000	1	1
+1240c8a6-6f1a-40ad-a558-7442da100573	779924a4-9fdf-45f6-97d9-7ac8fa69532b	스위트룸	6	440000	1	1
+db600d49-7fd6-4cc8-bbc5-9fb56c0af087	3435409c-54c1-4823-ae45-b7f6b2b4ffd6	스탠다드룸	4	150000	1	1
+47382b2f-b04a-4dd7-85a1-f5e2025796fc	3435409c-54c1-4823-ae45-b7f6b2b4ffd6	디럭스룸	4	180000	1	1
+1092abec-9163-4cb3-9353-ac1a4450d8c9	950a1f8c-6d74-4b32-a4e3-f3c6a4973d6f	스탠다드룸	6	280000	1	1
+db161370-6f7c-4a06-9a47-c37d67814821	950a1f8c-6d74-4b32-a4e3-f3c6a4973d6f	디럭스룸	6	310000	1	1
+b346dcfc-0442-4b01-8156-82b2c7265dfd	86eb76c6-edb7-49b1-8c55-ac6236b66957	룸1	2	100000	30	30
+7cb30882-b90e-4003-80dd-8c136fd771a7	86eb76c6-edb7-49b1-8c55-ac6236b66957	룸2	2	100000	30	30
+72b95092-29c7-41a5-ac3e-47ad1402d3ef	86eb76c6-edb7-49b1-8c55-ac6236b66957	프라이빗	4	300000	1	1
+07447737-cb5e-47e8-9899-4106c50c2557	86eb76c6-edb7-49b1-8c55-ac6236b66957	스튜디오	6	500000	1	1
+37ac386c-1e88-4a20-82a6-d6d3a7aca5c8	d83e5082-a03d-4e1c-918a-37d17b0d8995	룸1	2	100000	30	30
+abb6be0f-7425-42f6-a34f-bbfca90b0bd3	d83e5082-a03d-4e1c-918a-37d17b0d8995	룸2	2	100000	30	30
+d621b22f-b114-4d56-9df9-f8873489e616	d83e5082-a03d-4e1c-918a-37d17b0d8995	프라이빗	4	300000	1	1
+9a02fd2c-74a0-446b-8d35-ddd5c9ece798	d83e5082-a03d-4e1c-918a-37d17b0d8995	스튜디오	6	600000	1	1
+ce4c3dfa-c3c7-4998-96c1-8c8d01e63efd	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	룸1	2	50000	30	30
+23293676-3998-4ee0-b26d-384268325aff	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	룸2	2	80000	30	30
+e6b947ce-97a5-4c81-994c-916e9ae4439e	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	프라이빗	4	300000	1	1
+fb10dd05-23ea-4037-a30e-5fc9fc6f0870	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	스튜디오	6	700000	1	1
+\.
+
+-- ── stay_images ──
+COPY stay_images (id, stay_id, url, is_main) FROM stdin;
+a1000001-0000-0000-0000-000000000001	86eb76c6-edb7-49b1-8c55-ac6236b66957	http://192.168.111.138/images/soldesk_gangnam_pavilion_1.jpg	t
+a1000001-0000-0000-0000-000000000011	86eb76c6-edb7-49b1-8c55-ac6236b66957	http://192.168.111.138/images/soldesk_gangnam_pavilion_2.jpg	f
+a1000001-0000-0000-0000-000000000012	86eb76c6-edb7-49b1-8c55-ac6236b66957	http://192.168.111.138/images/soldesk_gangnam_pavilion_3.jpg	f
+a1000001-0000-0000-0000-000000000013	86eb76c6-edb7-49b1-8c55-ac6236b66957	http://192.168.111.138/images/soldesk_gangnam_pavilion_4.jpg	f
+a1000001-0000-0000-0000-000000000014	86eb76c6-edb7-49b1-8c55-ac6236b66957	http://192.168.111.138/images/soldesk_gangnam_pavilion_5.jpg	f
+a1000001-0000-0000-0000-000000000002	d83e5082-a03d-4e1c-918a-37d17b0d8995	http://192.168.111.138/images/soldesk_gangnam_seongok_1.jpg	t
+a1000001-0000-0000-0000-000000000021	d83e5082-a03d-4e1c-918a-37d17b0d8995	http://192.168.111.138/images/soldesk_gangnam_seongok_2.jpg	f
+a1000001-0000-0000-0000-000000000022	d83e5082-a03d-4e1c-918a-37d17b0d8995	http://192.168.111.138/images/soldesk_gangnam_seongok_3.jpg	f
+a1000001-0000-0000-0000-000000000023	d83e5082-a03d-4e1c-918a-37d17b0d8995	http://192.168.111.138/images/soldesk_gangnam_seongok_4.jpg	f
+a1000001-0000-0000-0000-000000000003	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	http://192.168.111.138/images/soldesk_jongro_1.jpg	t
+a1000001-0000-0000-0000-000000000031	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	http://192.168.111.138/images/soldesk_jongro_2.jpg	f
+a1000001-0000-0000-0000-000000000032	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	http://192.168.111.138/images/soldesk_jongro_3.jpg	f
+a1000001-0000-0000-0000-000000000033	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	http://192.168.111.138/images/soldesk_jongro_4.jpg	f
+\.
+
+-- ── events ──
+COPY events (id, title, description, discount_rate, start_date, end_date, status, type, region, total_rooms, remaining_rooms, banner_color) FROM stdin;
+ebcb445f-1d96-42e4-97d5-ff938dde7315	솔데스크 전 지점 동시 오픈 기념	솔데스크 종로 · 강남1 · 강남 동시 오픈 기념 특가! 선착순 100명 한정 쿠폰 발급. 쿠폰 적용 시 최대 30% 할인.	30	2026-05-06	2026-05-31	ongoing	오픈기념	서울	100	100	#111111
+\.
+
+-- ── event_stays ──
+COPY event_stays (event_id, stay_id, discount_rate, remaining_rooms) FROM stdin;
+ebcb445f-1d96-42e4-97d5-ff938dde7315	86eb76c6-edb7-49b1-8c55-ac6236b66957	30	100
+ebcb445f-1d96-42e4-97d5-ff938dde7315	d83e5082-a03d-4e1c-918a-37d17b0d8995	30	100
+ebcb445f-1d96-42e4-97d5-ff938dde7315	dd01ddae-11b8-44ec-8ddd-841e0d81ee1d	30	100
+\.
+
+-- ── coupons ──
+COPY coupons (id, code, event_id, stay_id, discount_rate, total_count, remaining_count, used_by, is_used, created_at) FROM stdin;
+00000001-0000-4000-8000-000000000000	SOLD-0001	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000002-0000-4000-8000-000000000000	SOLD-0002	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000003-0000-4000-8000-000000000000	SOLD-0003	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000004-0000-4000-8000-000000000000	SOLD-0004	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000005-0000-4000-8000-000000000000	SOLD-0005	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000006-0000-4000-8000-000000000000	SOLD-0006	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000007-0000-4000-8000-000000000000	SOLD-0007	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000008-0000-4000-8000-000000000000	SOLD-0008	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000009-0000-4000-8000-000000000000	SOLD-0009	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000000a-0000-4000-8000-000000000000	SOLD-0010	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000000b-0000-4000-8000-000000000000	SOLD-0011	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000000c-0000-4000-8000-000000000000	SOLD-0012	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000000d-0000-4000-8000-000000000000	SOLD-0013	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000000e-0000-4000-8000-000000000000	SOLD-0014	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000000f-0000-4000-8000-000000000000	SOLD-0015	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000010-0000-4000-8000-000000000000	SOLD-0016	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000011-0000-4000-8000-000000000000	SOLD-0017	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000012-0000-4000-8000-000000000000	SOLD-0018	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000013-0000-4000-8000-000000000000	SOLD-0019	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000014-0000-4000-8000-000000000000	SOLD-0020	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000015-0000-4000-8000-000000000000	SOLD-0021	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000016-0000-4000-8000-000000000000	SOLD-0022	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000017-0000-4000-8000-000000000000	SOLD-0023	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000018-0000-4000-8000-000000000000	SOLD-0024	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000019-0000-4000-8000-000000000000	SOLD-0025	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000001a-0000-4000-8000-000000000000	SOLD-0026	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000001b-0000-4000-8000-000000000000	SOLD-0027	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000001c-0000-4000-8000-000000000000	SOLD-0028	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000001d-0000-4000-8000-000000000000	SOLD-0029	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000001e-0000-4000-8000-000000000000	SOLD-0030	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000001f-0000-4000-8000-000000000000	SOLD-0031	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000020-0000-4000-8000-000000000000	SOLD-0032	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000021-0000-4000-8000-000000000000	SOLD-0033	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000022-0000-4000-8000-000000000000	SOLD-0034	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000023-0000-4000-8000-000000000000	SOLD-0035	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000024-0000-4000-8000-000000000000	SOLD-0036	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000025-0000-4000-8000-000000000000	SOLD-0037	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000026-0000-4000-8000-000000000000	SOLD-0038	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000027-0000-4000-8000-000000000000	SOLD-0039	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000028-0000-4000-8000-000000000000	SOLD-0040	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000029-0000-4000-8000-000000000000	SOLD-0041	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000002a-0000-4000-8000-000000000000	SOLD-0042	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000002b-0000-4000-8000-000000000000	SOLD-0043	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000002c-0000-4000-8000-000000000000	SOLD-0044	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000002d-0000-4000-8000-000000000000	SOLD-0045	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000002e-0000-4000-8000-000000000000	SOLD-0046	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000002f-0000-4000-8000-000000000000	SOLD-0047	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000030-0000-4000-8000-000000000000	SOLD-0048	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000031-0000-4000-8000-000000000000	SOLD-0049	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000032-0000-4000-8000-000000000000	SOLD-0050	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000033-0000-4000-8000-000000000000	SOLD-0051	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000034-0000-4000-8000-000000000000	SOLD-0052	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000035-0000-4000-8000-000000000000	SOLD-0053	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000036-0000-4000-8000-000000000000	SOLD-0054	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000037-0000-4000-8000-000000000000	SOLD-0055	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000038-0000-4000-8000-000000000000	SOLD-0056	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000039-0000-4000-8000-000000000000	SOLD-0057	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000003a-0000-4000-8000-000000000000	SOLD-0058	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000003b-0000-4000-8000-000000000000	SOLD-0059	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000003c-0000-4000-8000-000000000000	SOLD-0060	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000003d-0000-4000-8000-000000000000	SOLD-0061	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000003e-0000-4000-8000-000000000000	SOLD-0062	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000003f-0000-4000-8000-000000000000	SOLD-0063	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000040-0000-4000-8000-000000000000	SOLD-0064	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000041-0000-4000-8000-000000000000	SOLD-0065	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000042-0000-4000-8000-000000000000	SOLD-0066	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000043-0000-4000-8000-000000000000	SOLD-0067	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000044-0000-4000-8000-000000000000	SOLD-0068	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000045-0000-4000-8000-000000000000	SOLD-0069	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000046-0000-4000-8000-000000000000	SOLD-0070	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000047-0000-4000-8000-000000000000	SOLD-0071	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000048-0000-4000-8000-000000000000	SOLD-0072	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000049-0000-4000-8000-000000000000	SOLD-0073	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000004a-0000-4000-8000-000000000000	SOLD-0074	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000004b-0000-4000-8000-000000000000	SOLD-0075	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000004c-0000-4000-8000-000000000000	SOLD-0076	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000004d-0000-4000-8000-000000000000	SOLD-0077	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000004e-0000-4000-8000-000000000000	SOLD-0078	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000004f-0000-4000-8000-000000000000	SOLD-0079	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000050-0000-4000-8000-000000000000	SOLD-0080	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000051-0000-4000-8000-000000000000	SOLD-0081	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000052-0000-4000-8000-000000000000	SOLD-0082	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000053-0000-4000-8000-000000000000	SOLD-0083	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000054-0000-4000-8000-000000000000	SOLD-0084	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000055-0000-4000-8000-000000000000	SOLD-0085	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000056-0000-4000-8000-000000000000	SOLD-0086	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000057-0000-4000-8000-000000000000	SOLD-0087	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000058-0000-4000-8000-000000000000	SOLD-0088	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000059-0000-4000-8000-000000000000	SOLD-0089	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000005a-0000-4000-8000-000000000000	SOLD-0090	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000005b-0000-4000-8000-000000000000	SOLD-0091	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000005c-0000-4000-8000-000000000000	SOLD-0092	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000005d-0000-4000-8000-000000000000	SOLD-0093	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000005e-0000-4000-8000-000000000000	SOLD-0094	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000005f-0000-4000-8000-000000000000	SOLD-0095	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000060-0000-4000-8000-000000000000	SOLD-0096	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000061-0000-4000-8000-000000000000	SOLD-0097	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000062-0000-4000-8000-000000000000	SOLD-0098	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000063-0000-4000-8000-000000000000	SOLD-0099	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000064-0000-4000-8000-000000000000	SOLD-0100	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000065-0000-4000-8000-000000000000	SOLD-0101	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000066-0000-4000-8000-000000000000	SOLD-0102	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000067-0000-4000-8000-000000000000	SOLD-0103	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000068-0000-4000-8000-000000000000	SOLD-0104	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000069-0000-4000-8000-000000000000	SOLD-0105	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000006a-0000-4000-8000-000000000000	SOLD-0106	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000006b-0000-4000-8000-000000000000	SOLD-0107	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000006c-0000-4000-8000-000000000000	SOLD-0108	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000006d-0000-4000-8000-000000000000	SOLD-0109	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000006e-0000-4000-8000-000000000000	SOLD-0110	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000006f-0000-4000-8000-000000000000	SOLD-0111	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000070-0000-4000-8000-000000000000	SOLD-0112	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000071-0000-4000-8000-000000000000	SOLD-0113	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000072-0000-4000-8000-000000000000	SOLD-0114	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000073-0000-4000-8000-000000000000	SOLD-0115	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000074-0000-4000-8000-000000000000	SOLD-0116	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000075-0000-4000-8000-000000000000	SOLD-0117	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000076-0000-4000-8000-000000000000	SOLD-0118	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000077-0000-4000-8000-000000000000	SOLD-0119	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000078-0000-4000-8000-000000000000	SOLD-0120	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000079-0000-4000-8000-000000000000	SOLD-0121	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000007a-0000-4000-8000-000000000000	SOLD-0122	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000007b-0000-4000-8000-000000000000	SOLD-0123	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000007c-0000-4000-8000-000000000000	SOLD-0124	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000007d-0000-4000-8000-000000000000	SOLD-0125	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000007e-0000-4000-8000-000000000000	SOLD-0126	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000007f-0000-4000-8000-000000000000	SOLD-0127	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000080-0000-4000-8000-000000000000	SOLD-0128	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000081-0000-4000-8000-000000000000	SOLD-0129	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000082-0000-4000-8000-000000000000	SOLD-0130	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000083-0000-4000-8000-000000000000	SOLD-0131	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000084-0000-4000-8000-000000000000	SOLD-0132	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000085-0000-4000-8000-000000000000	SOLD-0133	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000086-0000-4000-8000-000000000000	SOLD-0134	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000087-0000-4000-8000-000000000000	SOLD-0135	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000088-0000-4000-8000-000000000000	SOLD-0136	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000089-0000-4000-8000-000000000000	SOLD-0137	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000008a-0000-4000-8000-000000000000	SOLD-0138	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000008b-0000-4000-8000-000000000000	SOLD-0139	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000008c-0000-4000-8000-000000000000	SOLD-0140	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000008d-0000-4000-8000-000000000000	SOLD-0141	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000008e-0000-4000-8000-000000000000	SOLD-0142	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000008f-0000-4000-8000-000000000000	SOLD-0143	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000090-0000-4000-8000-000000000000	SOLD-0144	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000091-0000-4000-8000-000000000000	SOLD-0145	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000092-0000-4000-8000-000000000000	SOLD-0146	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000093-0000-4000-8000-000000000000	SOLD-0147	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000094-0000-4000-8000-000000000000	SOLD-0148	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000095-0000-4000-8000-000000000000	SOLD-0149	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000096-0000-4000-8000-000000000000	SOLD-0150	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000097-0000-4000-8000-000000000000	SOLD-0151	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000098-0000-4000-8000-000000000000	SOLD-0152	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000099-0000-4000-8000-000000000000	SOLD-0153	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000009a-0000-4000-8000-000000000000	SOLD-0154	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000009b-0000-4000-8000-000000000000	SOLD-0155	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000009c-0000-4000-8000-000000000000	SOLD-0156	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000009d-0000-4000-8000-000000000000	SOLD-0157	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000009e-0000-4000-8000-000000000000	SOLD-0158	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000009f-0000-4000-8000-000000000000	SOLD-0159	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a0-0000-4000-8000-000000000000	SOLD-0160	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a1-0000-4000-8000-000000000000	SOLD-0161	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a2-0000-4000-8000-000000000000	SOLD-0162	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a3-0000-4000-8000-000000000000	SOLD-0163	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a4-0000-4000-8000-000000000000	SOLD-0164	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a5-0000-4000-8000-000000000000	SOLD-0165	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a6-0000-4000-8000-000000000000	SOLD-0166	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a7-0000-4000-8000-000000000000	SOLD-0167	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a8-0000-4000-8000-000000000000	SOLD-0168	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000a9-0000-4000-8000-000000000000	SOLD-0169	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000aa-0000-4000-8000-000000000000	SOLD-0170	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ab-0000-4000-8000-000000000000	SOLD-0171	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ac-0000-4000-8000-000000000000	SOLD-0172	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ad-0000-4000-8000-000000000000	SOLD-0173	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ae-0000-4000-8000-000000000000	SOLD-0174	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000af-0000-4000-8000-000000000000	SOLD-0175	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b0-0000-4000-8000-000000000000	SOLD-0176	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b1-0000-4000-8000-000000000000	SOLD-0177	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b2-0000-4000-8000-000000000000	SOLD-0178	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b3-0000-4000-8000-000000000000	SOLD-0179	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b4-0000-4000-8000-000000000000	SOLD-0180	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b5-0000-4000-8000-000000000000	SOLD-0181	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b6-0000-4000-8000-000000000000	SOLD-0182	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b7-0000-4000-8000-000000000000	SOLD-0183	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b8-0000-4000-8000-000000000000	SOLD-0184	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000b9-0000-4000-8000-000000000000	SOLD-0185	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ba-0000-4000-8000-000000000000	SOLD-0186	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000bb-0000-4000-8000-000000000000	SOLD-0187	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000bc-0000-4000-8000-000000000000	SOLD-0188	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000bd-0000-4000-8000-000000000000	SOLD-0189	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000be-0000-4000-8000-000000000000	SOLD-0190	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000bf-0000-4000-8000-000000000000	SOLD-0191	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c0-0000-4000-8000-000000000000	SOLD-0192	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c1-0000-4000-8000-000000000000	SOLD-0193	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c2-0000-4000-8000-000000000000	SOLD-0194	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c3-0000-4000-8000-000000000000	SOLD-0195	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c4-0000-4000-8000-000000000000	SOLD-0196	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c5-0000-4000-8000-000000000000	SOLD-0197	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c6-0000-4000-8000-000000000000	SOLD-0198	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c7-0000-4000-8000-000000000000	SOLD-0199	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c8-0000-4000-8000-000000000000	SOLD-0200	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000c9-0000-4000-8000-000000000000	SOLD-0201	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ca-0000-4000-8000-000000000000	SOLD-0202	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000cb-0000-4000-8000-000000000000	SOLD-0203	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000cc-0000-4000-8000-000000000000	SOLD-0204	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000cd-0000-4000-8000-000000000000	SOLD-0205	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ce-0000-4000-8000-000000000000	SOLD-0206	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000cf-0000-4000-8000-000000000000	SOLD-0207	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d0-0000-4000-8000-000000000000	SOLD-0208	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d1-0000-4000-8000-000000000000	SOLD-0209	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d2-0000-4000-8000-000000000000	SOLD-0210	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d3-0000-4000-8000-000000000000	SOLD-0211	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d4-0000-4000-8000-000000000000	SOLD-0212	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d5-0000-4000-8000-000000000000	SOLD-0213	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d6-0000-4000-8000-000000000000	SOLD-0214	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d7-0000-4000-8000-000000000000	SOLD-0215	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d8-0000-4000-8000-000000000000	SOLD-0216	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000d9-0000-4000-8000-000000000000	SOLD-0217	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000da-0000-4000-8000-000000000000	SOLD-0218	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000db-0000-4000-8000-000000000000	SOLD-0219	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000dc-0000-4000-8000-000000000000	SOLD-0220	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000dd-0000-4000-8000-000000000000	SOLD-0221	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000de-0000-4000-8000-000000000000	SOLD-0222	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000df-0000-4000-8000-000000000000	SOLD-0223	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e0-0000-4000-8000-000000000000	SOLD-0224	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e1-0000-4000-8000-000000000000	SOLD-0225	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e2-0000-4000-8000-000000000000	SOLD-0226	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e3-0000-4000-8000-000000000000	SOLD-0227	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e4-0000-4000-8000-000000000000	SOLD-0228	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e5-0000-4000-8000-000000000000	SOLD-0229	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e6-0000-4000-8000-000000000000	SOLD-0230	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e7-0000-4000-8000-000000000000	SOLD-0231	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e8-0000-4000-8000-000000000000	SOLD-0232	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000e9-0000-4000-8000-000000000000	SOLD-0233	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ea-0000-4000-8000-000000000000	SOLD-0234	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000eb-0000-4000-8000-000000000000	SOLD-0235	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ec-0000-4000-8000-000000000000	SOLD-0236	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ed-0000-4000-8000-000000000000	SOLD-0237	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ee-0000-4000-8000-000000000000	SOLD-0238	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ef-0000-4000-8000-000000000000	SOLD-0239	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f0-0000-4000-8000-000000000000	SOLD-0240	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f1-0000-4000-8000-000000000000	SOLD-0241	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f2-0000-4000-8000-000000000000	SOLD-0242	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f3-0000-4000-8000-000000000000	SOLD-0243	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f4-0000-4000-8000-000000000000	SOLD-0244	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f5-0000-4000-8000-000000000000	SOLD-0245	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f6-0000-4000-8000-000000000000	SOLD-0246	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f7-0000-4000-8000-000000000000	SOLD-0247	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f8-0000-4000-8000-000000000000	SOLD-0248	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000f9-0000-4000-8000-000000000000	SOLD-0249	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000fa-0000-4000-8000-000000000000	SOLD-0250	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000fb-0000-4000-8000-000000000000	SOLD-0251	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000fc-0000-4000-8000-000000000000	SOLD-0252	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000fd-0000-4000-8000-000000000000	SOLD-0253	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000fe-0000-4000-8000-000000000000	SOLD-0254	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000000ff-0000-4000-8000-000000000000	SOLD-0255	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000100-0000-4000-8000-000000000000	SOLD-0256	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000101-0000-4000-8000-000000000000	SOLD-0257	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000102-0000-4000-8000-000000000000	SOLD-0258	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000103-0000-4000-8000-000000000000	SOLD-0259	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000104-0000-4000-8000-000000000000	SOLD-0260	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000105-0000-4000-8000-000000000000	SOLD-0261	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000106-0000-4000-8000-000000000000	SOLD-0262	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000107-0000-4000-8000-000000000000	SOLD-0263	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000108-0000-4000-8000-000000000000	SOLD-0264	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000109-0000-4000-8000-000000000000	SOLD-0265	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000010a-0000-4000-8000-000000000000	SOLD-0266	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000010b-0000-4000-8000-000000000000	SOLD-0267	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000010c-0000-4000-8000-000000000000	SOLD-0268	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000010d-0000-4000-8000-000000000000	SOLD-0269	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000010e-0000-4000-8000-000000000000	SOLD-0270	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000010f-0000-4000-8000-000000000000	SOLD-0271	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000110-0000-4000-8000-000000000000	SOLD-0272	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000111-0000-4000-8000-000000000000	SOLD-0273	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000112-0000-4000-8000-000000000000	SOLD-0274	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000113-0000-4000-8000-000000000000	SOLD-0275	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000114-0000-4000-8000-000000000000	SOLD-0276	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000115-0000-4000-8000-000000000000	SOLD-0277	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000116-0000-4000-8000-000000000000	SOLD-0278	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000117-0000-4000-8000-000000000000	SOLD-0279	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000118-0000-4000-8000-000000000000	SOLD-0280	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000119-0000-4000-8000-000000000000	SOLD-0281	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000011a-0000-4000-8000-000000000000	SOLD-0282	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000011b-0000-4000-8000-000000000000	SOLD-0283	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000011c-0000-4000-8000-000000000000	SOLD-0284	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000011d-0000-4000-8000-000000000000	SOLD-0285	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000011e-0000-4000-8000-000000000000	SOLD-0286	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000011f-0000-4000-8000-000000000000	SOLD-0287	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000120-0000-4000-8000-000000000000	SOLD-0288	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000121-0000-4000-8000-000000000000	SOLD-0289	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000122-0000-4000-8000-000000000000	SOLD-0290	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000123-0000-4000-8000-000000000000	SOLD-0291	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000124-0000-4000-8000-000000000000	SOLD-0292	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000125-0000-4000-8000-000000000000	SOLD-0293	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000126-0000-4000-8000-000000000000	SOLD-0294	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000127-0000-4000-8000-000000000000	SOLD-0295	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000128-0000-4000-8000-000000000000	SOLD-0296	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000129-0000-4000-8000-000000000000	SOLD-0297	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000012a-0000-4000-8000-000000000000	SOLD-0298	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000012b-0000-4000-8000-000000000000	SOLD-0299	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000012c-0000-4000-8000-000000000000	SOLD-0300	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000012d-0000-4000-8000-000000000000	SOLD-0301	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000012e-0000-4000-8000-000000000000	SOLD-0302	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000012f-0000-4000-8000-000000000000	SOLD-0303	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000130-0000-4000-8000-000000000000	SOLD-0304	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000131-0000-4000-8000-000000000000	SOLD-0305	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000132-0000-4000-8000-000000000000	SOLD-0306	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000133-0000-4000-8000-000000000000	SOLD-0307	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000134-0000-4000-8000-000000000000	SOLD-0308	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000135-0000-4000-8000-000000000000	SOLD-0309	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000136-0000-4000-8000-000000000000	SOLD-0310	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000137-0000-4000-8000-000000000000	SOLD-0311	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000138-0000-4000-8000-000000000000	SOLD-0312	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000139-0000-4000-8000-000000000000	SOLD-0313	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000013a-0000-4000-8000-000000000000	SOLD-0314	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000013b-0000-4000-8000-000000000000	SOLD-0315	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000013c-0000-4000-8000-000000000000	SOLD-0316	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000013d-0000-4000-8000-000000000000	SOLD-0317	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000013e-0000-4000-8000-000000000000	SOLD-0318	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000013f-0000-4000-8000-000000000000	SOLD-0319	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000140-0000-4000-8000-000000000000	SOLD-0320	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000141-0000-4000-8000-000000000000	SOLD-0321	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000142-0000-4000-8000-000000000000	SOLD-0322	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000143-0000-4000-8000-000000000000	SOLD-0323	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000144-0000-4000-8000-000000000000	SOLD-0324	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000145-0000-4000-8000-000000000000	SOLD-0325	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000146-0000-4000-8000-000000000000	SOLD-0326	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000147-0000-4000-8000-000000000000	SOLD-0327	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000148-0000-4000-8000-000000000000	SOLD-0328	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000149-0000-4000-8000-000000000000	SOLD-0329	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000014a-0000-4000-8000-000000000000	SOLD-0330	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000014b-0000-4000-8000-000000000000	SOLD-0331	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000014c-0000-4000-8000-000000000000	SOLD-0332	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000014d-0000-4000-8000-000000000000	SOLD-0333	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000014e-0000-4000-8000-000000000000	SOLD-0334	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000014f-0000-4000-8000-000000000000	SOLD-0335	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000150-0000-4000-8000-000000000000	SOLD-0336	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000151-0000-4000-8000-000000000000	SOLD-0337	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000152-0000-4000-8000-000000000000	SOLD-0338	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000153-0000-4000-8000-000000000000	SOLD-0339	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000154-0000-4000-8000-000000000000	SOLD-0340	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000155-0000-4000-8000-000000000000	SOLD-0341	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000156-0000-4000-8000-000000000000	SOLD-0342	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000157-0000-4000-8000-000000000000	SOLD-0343	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000158-0000-4000-8000-000000000000	SOLD-0344	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000159-0000-4000-8000-000000000000	SOLD-0345	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000015a-0000-4000-8000-000000000000	SOLD-0346	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000015b-0000-4000-8000-000000000000	SOLD-0347	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000015c-0000-4000-8000-000000000000	SOLD-0348	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000015d-0000-4000-8000-000000000000	SOLD-0349	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000015e-0000-4000-8000-000000000000	SOLD-0350	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000015f-0000-4000-8000-000000000000	SOLD-0351	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000160-0000-4000-8000-000000000000	SOLD-0352	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000161-0000-4000-8000-000000000000	SOLD-0353	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000162-0000-4000-8000-000000000000	SOLD-0354	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000163-0000-4000-8000-000000000000	SOLD-0355	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000164-0000-4000-8000-000000000000	SOLD-0356	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000165-0000-4000-8000-000000000000	SOLD-0357	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000166-0000-4000-8000-000000000000	SOLD-0358	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000167-0000-4000-8000-000000000000	SOLD-0359	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000168-0000-4000-8000-000000000000	SOLD-0360	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000169-0000-4000-8000-000000000000	SOLD-0361	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000016a-0000-4000-8000-000000000000	SOLD-0362	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000016b-0000-4000-8000-000000000000	SOLD-0363	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000016c-0000-4000-8000-000000000000	SOLD-0364	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000016d-0000-4000-8000-000000000000	SOLD-0365	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000016e-0000-4000-8000-000000000000	SOLD-0366	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000016f-0000-4000-8000-000000000000	SOLD-0367	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000170-0000-4000-8000-000000000000	SOLD-0368	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000171-0000-4000-8000-000000000000	SOLD-0369	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000172-0000-4000-8000-000000000000	SOLD-0370	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000173-0000-4000-8000-000000000000	SOLD-0371	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000174-0000-4000-8000-000000000000	SOLD-0372	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000175-0000-4000-8000-000000000000	SOLD-0373	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000176-0000-4000-8000-000000000000	SOLD-0374	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000177-0000-4000-8000-000000000000	SOLD-0375	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000178-0000-4000-8000-000000000000	SOLD-0376	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000179-0000-4000-8000-000000000000	SOLD-0377	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000017a-0000-4000-8000-000000000000	SOLD-0378	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000017b-0000-4000-8000-000000000000	SOLD-0379	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000017c-0000-4000-8000-000000000000	SOLD-0380	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000017d-0000-4000-8000-000000000000	SOLD-0381	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000017e-0000-4000-8000-000000000000	SOLD-0382	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000017f-0000-4000-8000-000000000000	SOLD-0383	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000180-0000-4000-8000-000000000000	SOLD-0384	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000181-0000-4000-8000-000000000000	SOLD-0385	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000182-0000-4000-8000-000000000000	SOLD-0386	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000183-0000-4000-8000-000000000000	SOLD-0387	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000184-0000-4000-8000-000000000000	SOLD-0388	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000185-0000-4000-8000-000000000000	SOLD-0389	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000186-0000-4000-8000-000000000000	SOLD-0390	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000187-0000-4000-8000-000000000000	SOLD-0391	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000188-0000-4000-8000-000000000000	SOLD-0392	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000189-0000-4000-8000-000000000000	SOLD-0393	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000018a-0000-4000-8000-000000000000	SOLD-0394	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000018b-0000-4000-8000-000000000000	SOLD-0395	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000018c-0000-4000-8000-000000000000	SOLD-0396	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000018d-0000-4000-8000-000000000000	SOLD-0397	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000018e-0000-4000-8000-000000000000	SOLD-0398	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000018f-0000-4000-8000-000000000000	SOLD-0399	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000190-0000-4000-8000-000000000000	SOLD-0400	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000191-0000-4000-8000-000000000000	SOLD-0401	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000192-0000-4000-8000-000000000000	SOLD-0402	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000193-0000-4000-8000-000000000000	SOLD-0403	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000194-0000-4000-8000-000000000000	SOLD-0404	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000195-0000-4000-8000-000000000000	SOLD-0405	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000196-0000-4000-8000-000000000000	SOLD-0406	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000197-0000-4000-8000-000000000000	SOLD-0407	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000198-0000-4000-8000-000000000000	SOLD-0408	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000199-0000-4000-8000-000000000000	SOLD-0409	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000019a-0000-4000-8000-000000000000	SOLD-0410	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000019b-0000-4000-8000-000000000000	SOLD-0411	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000019c-0000-4000-8000-000000000000	SOLD-0412	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000019d-0000-4000-8000-000000000000	SOLD-0413	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000019e-0000-4000-8000-000000000000	SOLD-0414	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+0000019f-0000-4000-8000-000000000000	SOLD-0415	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a0-0000-4000-8000-000000000000	SOLD-0416	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a1-0000-4000-8000-000000000000	SOLD-0417	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a2-0000-4000-8000-000000000000	SOLD-0418	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a3-0000-4000-8000-000000000000	SOLD-0419	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a4-0000-4000-8000-000000000000	SOLD-0420	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a5-0000-4000-8000-000000000000	SOLD-0421	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a6-0000-4000-8000-000000000000	SOLD-0422	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a7-0000-4000-8000-000000000000	SOLD-0423	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a8-0000-4000-8000-000000000000	SOLD-0424	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001a9-0000-4000-8000-000000000000	SOLD-0425	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001aa-0000-4000-8000-000000000000	SOLD-0426	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ab-0000-4000-8000-000000000000	SOLD-0427	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ac-0000-4000-8000-000000000000	SOLD-0428	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ad-0000-4000-8000-000000000000	SOLD-0429	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ae-0000-4000-8000-000000000000	SOLD-0430	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001af-0000-4000-8000-000000000000	SOLD-0431	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b0-0000-4000-8000-000000000000	SOLD-0432	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b1-0000-4000-8000-000000000000	SOLD-0433	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b2-0000-4000-8000-000000000000	SOLD-0434	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b3-0000-4000-8000-000000000000	SOLD-0435	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b4-0000-4000-8000-000000000000	SOLD-0436	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b5-0000-4000-8000-000000000000	SOLD-0437	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b6-0000-4000-8000-000000000000	SOLD-0438	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b7-0000-4000-8000-000000000000	SOLD-0439	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b8-0000-4000-8000-000000000000	SOLD-0440	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001b9-0000-4000-8000-000000000000	SOLD-0441	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ba-0000-4000-8000-000000000000	SOLD-0442	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001bb-0000-4000-8000-000000000000	SOLD-0443	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001bc-0000-4000-8000-000000000000	SOLD-0444	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001bd-0000-4000-8000-000000000000	SOLD-0445	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001be-0000-4000-8000-000000000000	SOLD-0446	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001bf-0000-4000-8000-000000000000	SOLD-0447	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c0-0000-4000-8000-000000000000	SOLD-0448	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c1-0000-4000-8000-000000000000	SOLD-0449	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c2-0000-4000-8000-000000000000	SOLD-0450	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c3-0000-4000-8000-000000000000	SOLD-0451	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c4-0000-4000-8000-000000000000	SOLD-0452	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c5-0000-4000-8000-000000000000	SOLD-0453	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c6-0000-4000-8000-000000000000	SOLD-0454	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c7-0000-4000-8000-000000000000	SOLD-0455	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c8-0000-4000-8000-000000000000	SOLD-0456	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001c9-0000-4000-8000-000000000000	SOLD-0457	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ca-0000-4000-8000-000000000000	SOLD-0458	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001cb-0000-4000-8000-000000000000	SOLD-0459	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001cc-0000-4000-8000-000000000000	SOLD-0460	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001cd-0000-4000-8000-000000000000	SOLD-0461	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ce-0000-4000-8000-000000000000	SOLD-0462	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001cf-0000-4000-8000-000000000000	SOLD-0463	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d0-0000-4000-8000-000000000000	SOLD-0464	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d1-0000-4000-8000-000000000000	SOLD-0465	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d2-0000-4000-8000-000000000000	SOLD-0466	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d3-0000-4000-8000-000000000000	SOLD-0467	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d4-0000-4000-8000-000000000000	SOLD-0468	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d5-0000-4000-8000-000000000000	SOLD-0469	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d6-0000-4000-8000-000000000000	SOLD-0470	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d7-0000-4000-8000-000000000000	SOLD-0471	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d8-0000-4000-8000-000000000000	SOLD-0472	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001d9-0000-4000-8000-000000000000	SOLD-0473	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001da-0000-4000-8000-000000000000	SOLD-0474	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001db-0000-4000-8000-000000000000	SOLD-0475	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001dc-0000-4000-8000-000000000000	SOLD-0476	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001dd-0000-4000-8000-000000000000	SOLD-0477	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001de-0000-4000-8000-000000000000	SOLD-0478	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001df-0000-4000-8000-000000000000	SOLD-0479	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e0-0000-4000-8000-000000000000	SOLD-0480	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e1-0000-4000-8000-000000000000	SOLD-0481	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e2-0000-4000-8000-000000000000	SOLD-0482	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e3-0000-4000-8000-000000000000	SOLD-0483	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e4-0000-4000-8000-000000000000	SOLD-0484	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e5-0000-4000-8000-000000000000	SOLD-0485	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e6-0000-4000-8000-000000000000	SOLD-0486	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e7-0000-4000-8000-000000000000	SOLD-0487	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e8-0000-4000-8000-000000000000	SOLD-0488	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001e9-0000-4000-8000-000000000000	SOLD-0489	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ea-0000-4000-8000-000000000000	SOLD-0490	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001eb-0000-4000-8000-000000000000	SOLD-0491	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ec-0000-4000-8000-000000000000	SOLD-0492	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ed-0000-4000-8000-000000000000	SOLD-0493	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ee-0000-4000-8000-000000000000	SOLD-0494	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001ef-0000-4000-8000-000000000000	SOLD-0495	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001f0-0000-4000-8000-000000000000	SOLD-0496	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001f1-0000-4000-8000-000000000000	SOLD-0497	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001f2-0000-4000-8000-000000000000	SOLD-0498	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001f3-0000-4000-8000-000000000000	SOLD-0499	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+000001f4-0000-4000-8000-000000000000	SOLD-0500	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1	1	\N	f	2026-05-06 01:00:00
+00000000-0000-4000-8000-000000000000	SOLD-LOAD	ebcb445f-1d96-42e4-97d5-ff938dde7315	\N	30	1000	1000	\N	f	2026-05-06 00:00:00
+\.
+
+
+-- JMeter 시나리오2용 쿠폰 (SOLD-2026)
+INSERT INTO coupons (id, code, event_id, discount_rate, total_count, remaining_count, is_used)
+VALUES ('00000000-0000-4000-8000-000000000001',
+        'SOLD-2026',
+        'ebcb445f-1d96-42e4-97d5-ff938dde7315',
+        30, 1000, 1000, FALSE)
+ON CONFLICT DO NOTHING;
